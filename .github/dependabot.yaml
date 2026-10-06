@@ -27,6 +27,8 @@ updates:
       ignore:
           - dependency-name: "jvm"
           - dependency-name: "plugin.spring"
+          - dependency-name: "org.springframework.boot:spring-boot-dependencies"
+            update-types: ["version-update:semver-major"]
     - package-ecosystem: docker
       directory: "/"
       schedule:
