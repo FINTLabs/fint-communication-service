@@ -7,7 +7,7 @@ buildscript {
             classpath("org.apache.httpcomponents.client5:httpclient5:5.6.4")
             classpath("org.apache.httpcomponents.core5:httpcore5:5.4.4")
             classpath("org.apache.httpcomponents.core5:httpcore5-h2:5.4.4")
-            classpath("org.apache.commons:commons-lang3:3.20.0")
+            classpath("org.apache.commons:commons-lang3:3.21.0")
         }
     }
 }
