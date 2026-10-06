@@ -1,0 +1,18 @@
+name: CD Deploy
+
+on:
+  workflow_run:
+    workflows:
+      - CI Build
+    types:
+      - completed
+
+jobs:
+  deploy:
+    uses: FINTLabs/fint-flyt-github-workflows/.github/workflows/java-app-cd-deploy.yaml@main
+    with:
+      deploy-targets: |
+        [
+          {"org":"fintlabs-no","cluster":"aks-beta-fint-2021-11-23"}
+        ]
+    secrets: inherit

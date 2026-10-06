@@ -1,0 +1,35 @@
+name: MD
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: Select environment
+        required: true
+        type: choice
+        options:
+          - aks-beta-fint-2021-11-23
+      org:
+        description: Select organisation
+        required: true
+        type: choice
+        options:
+          - fintlabs-no
+jobs:
+  build:
+    permissions:
+      contents: read
+      packages: write
+    uses: FINTLabs/fint-flyt-github-workflows/.github/workflows/java-app-build-image.yaml@main
+    with:
+      push-image: true
+    secrets: inherit
+
+  deploy:
+    needs: build
+    uses: FINTLabs/fint-flyt-github-workflows/.github/workflows/java-app-deploy-aks.yaml@main
+    with:
+      org: ${{ inputs.org }}
+      cluster: ${{ inputs.cluster }}
+      image-ref: ${{ needs.build.outputs.image-ref }}
+    secrets: inherit
