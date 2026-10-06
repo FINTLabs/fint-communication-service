@@ -1,0 +1,11 @@
+name: Publish to Reposilite
+
+on:
+  release:
+    types:
+      - published
+
+jobs:
+  publish:
+    uses: FINTLabs/fint-flyt-github-workflows/.github/workflows/java-library-publish-reposilite.yaml@main
+    secrets: inherit
