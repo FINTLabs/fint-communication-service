@@ -10,7 +10,7 @@ clusteret. Tenant er fylket meldingen sendes på vegne av.
 
 ## Status
 
-Grunnstruktur: Spring Boot-applikasjon med health-endepunkter, bygg og deploy til beta.
+Grunnstruktur: Spring Boot 4-applikasjon med health-endepunkter, bygg og deploy til beta.
 REST API, layout, leverandøradapter og autentisering kommer i egne oppgaver under
 [FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
 

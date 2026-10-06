@@ -25,9 +25,6 @@ updates:
                   - minor
                   - patch
       ignore:
-          - dependency-name: "org.springframework*"
-            update-types:
-                - "version-update:semver-major"
           - dependency-name: "jvm"
           - dependency-name: "plugin.spring"
     - package-ecosystem: docker
