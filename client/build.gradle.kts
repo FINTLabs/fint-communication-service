@@ -35,6 +35,7 @@ dependencies {
 
     "testSpring7Implementation"(project(":model"))
     "testSpring7Implementation"(platform("org.springframework.boot:spring-boot-dependencies:$springBoot4Version"))
+    "testSpring7Implementation"(platform("tools.jackson:jackson-bom:3.1.7"))
     "testSpring7Implementation"("org.springframework:spring-context")
     "testSpring7Implementation"("org.springframework:spring-web")
     "testSpring7Implementation"("org.springframework:spring-webflux")

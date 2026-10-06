@@ -9,6 +9,9 @@ tasks.jar {
     isEnabled = false
 }
 
+extra["tomcat.version"] = "11.0.26"
+extra["jackson-bom.version"] = "3.1.7"
+
 springBoot {
     mainClass.set("no.novari.communication.ApplicationKt")
 }
