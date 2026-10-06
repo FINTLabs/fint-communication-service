@@ -1,0 +1,17 @@
+name: CI Build
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    permissions:
+      contents: read
+      packages: write
+    uses: FINTLabs/fint-flyt-github-workflows/.github/workflows/java-app-build-image.yaml@main
+    with:
+      push-image: ${{ github.event_name == 'push' }}
+    secrets: inherit

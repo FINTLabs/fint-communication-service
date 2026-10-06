@@ -1,0 +1,55 @@
+apiVersion: fintlabs.no/v1alpha1
+kind: Application
+metadata:
+  name: fint-communication-service
+  namespace: fintlabs-no
+  labels:
+    app.kubernetes.io/name: fint-communication-service
+    app.kubernetes.io/instance: fint-communication-service_fintlabs_no
+    app.kubernetes.io/version: latest
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: fint-common
+    fintlabs.no/team: fint-common
+    fintlabs.no/org-id: fintlabs.no
+spec:
+  port: 8080
+  imagePullPolicy: Always
+  orgId: fintlabs.no
+  image: ghcr.io/fintlabs/fint-communication-service:sha-0000000
+  env:
+    - name: JAVA_TOOL_OPTIONS
+      value: '-XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=60'
+  resources:
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+    requests:
+      memory: "256Mi"
+      cpu: "50m"
+  probes:
+    startup:
+      path: /actuator/health
+      port: 8080
+      initialDelaySeconds: 20
+      failureThreshold: 12
+      periodSeconds: 10
+      timeoutSeconds: 3
+    readiness:
+      path: /actuator/health/readiness
+      port: 8080
+      initialDelaySeconds: 0
+      failureThreshold: 5
+      periodSeconds: 10
+      timeoutSeconds: 3
+    liveness:
+      path: /actuator/health/liveness
+      port: 8080
+      initialDelaySeconds: 0
+      failureThreshold: 5
+      periodSeconds: 10
+      timeoutSeconds: 3
+  restartPolicy: Always
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
