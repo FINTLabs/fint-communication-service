@@ -25,6 +25,9 @@ afterEvaluate {
             if (requested.group == "org.jetbrains.kotlin") {
                 useVersion("2.2.21")
             }
+            if (requested.group == "ch.qos.logback") {
+                useVersion("1.5.38")
+            }
         }
     }
 }

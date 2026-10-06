@@ -24,6 +24,7 @@ dependencies {
     compileOnly("io.projectreactor:reactor-core")
 
     testImplementation(platform("org.springframework.boot:spring-boot-dependencies:$springBoot3Version"))
+    testImplementation(platform("com.fasterxml.jackson:jackson-bom:2.21.7"))
     testImplementation("org.springframework:spring-context")
     testImplementation("org.springframework:spring-web")
     testImplementation("org.springframework:spring-webflux")
