@@ -19,5 +19,7 @@ dependencies {
         implementation("org.apache.httpcomponents.core5:httpcore5:5.4.4")
         implementation("org.apache.httpcomponents.core5:httpcore5-h2:5.4.4")
         implementation("org.apache.commons:commons-lang3:3.21.0")
+        implementation("tools.jackson.core:jackson-core:3.1.7")
+        implementation("tools.jackson.core:jackson-databind:3.1.7")
     }
 }
