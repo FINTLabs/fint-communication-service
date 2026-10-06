@@ -50,12 +50,18 @@ class EmailPayloadTest {
     }
 
     @Test
-    fun `toString masks every field that may contain personal data`() {
-        val payload = validPayload().copy(replyTo = "kari.nordmann@rogfk.no")
+    fun `toString masks recipient, subject and body since they may contain personal data`() {
+        assertThat(validPayload().toString())
+            .startsWith("EmailPayload(to=***, subject=***, body=***,")
+            .doesNotContain("ola.nordmann", "Vedtak", "fødselsnummer")
+    }
+
+    @Test
+    fun `toString shows replyTo since it is a Novari address and not personal data`() {
+        val payload = validPayload().copy(replyTo = "no-reply@novari.no")
 
         assertThat(payload.toString())
-            .isEqualTo("EmailPayload(to=***, subject=***, body=***, replyTo=kari.nordmann@rogfk.no)")
-            .doesNotContain("ola.nordmann", "Vedtak", "fødselsnummer")
+            .isEqualTo("EmailPayload(to=***, subject=***, body=***, replyTo=no-reply@novari.no)")
     }
 
     @Test
