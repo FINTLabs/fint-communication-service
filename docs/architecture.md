@@ -17,10 +17,11 @@ Deler som ennå ikke er implementert, er merket **planlagt** og viser til oppgav
 7. [Feilhåndtering](#feilhåndtering)
 8. [Malsystemet](#malsystemet)
 9. [Meldingsstatus](#meldingsstatus)
-10. [Personvern og logging](#personvern-og-logging)
-11. [Drift](#drift)
-12. [Videre utvikling](#videre-utvikling)
-13. [Sentrale beslutninger](#sentrale-beslutninger)
+10. [Database](#database)
+11. [Personvern og logging](#personvern-og-logging)
+12. [Drift](#drift)
+13. [Videre utvikling](#videre-utvikling)
+14. [Sentrale beslutninger](#sentrale-beslutninger)
 
 ## C4 nivå 1: Systemkontekst
 
@@ -69,7 +70,7 @@ C4Container
 
     Container_Ext(konsumentApp, "Konsument-applikasjon", "Spring Boot 3 eller 4, f.eks. Flyt", "Bygger SendMessageRequest og kaller tjenesten via fint-communication-client.")
     Container(app, "API-applikasjon", "Kotlin, Spring Boot 4, Java 25", "Del av fint-communication-service. REST API, validering, maler og meldingsmottak.")
-    ContainerDb(db, "Database", "PostgreSQL, fint-common", "Del av fint-communication-service. Meldinger og status. Planlagt.")
+    ContainerDb(db, "Database", "PostgreSQL, fint-common", "Del av fint-communication-service. Migreres med Flyway ved oppstart. Tabeller for grenser, blokkeringsliste og status er planlagt (FFS-2333–2337).")
     ContainerQueue_Ext(kafka, "Kafka", "novari.communication.*", "Sekundær inngang. Planlagt, fase 6.")
     System_Ext(nam, "NAM", "OAuth2. Planlagt.")
     System_Ext(acs, "Azure Communication Services", "E-post. Planlagt.")
@@ -77,7 +78,7 @@ C4Container
     Rel(konsumentApp, app, "POST /api/v1/messages", "HTTP/JSON")
     Rel(konsumentApp, kafka, "Publiserer meldinger", "Planlagt")
     Rel(kafka, app, "Konsumeres av", "Planlagt")
-    Rel(app, db, "Lagrer meldinger", "JDBC, planlagt")
+    Rel(app, db, "Leser og skriver", "JDBC")
     Rel(app, nam, "Validerer token", "Planlagt")
     Rel(app, acs, "Sender e-post", "Planlagt")
 
@@ -90,9 +91,11 @@ C4Container
     UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
 ```
 
-Blå bokser er en del av fint-communication-service, grå er eksterne. I dag består tjenesten av én
-container: API-applikasjonen. Den har ingen tilstand mellom requester
-og kan skaleres horisontalt. Malene ligger i applikasjonens classpath og er ikke en egen container.
+Blå bokser er en del av fint-communication-service, grå er eksterne. Tjenesten består av
+API-applikasjonen og en Postgres-database (`fint-common`). Databasen har foreløpig bare Flyways
+historikktabell; tabellene kommer med oppgavene som trenger dem. API-applikasjonen holder ingen
+tilstand i minnet og kan skaleres horisontalt. Malene ligger i applikasjonens classpath og er ikke en
+egen container.
 
 ## C4 nivå 3: Komponenter
 
@@ -144,6 +147,10 @@ no.novari.communication
 │   ├── domain/          OutgoingMessage, MessagePayload, EmailPayload, MessageId,
 │   │                    MessageStatus, MessageChannel, EmailAddress
 │   └── dispatch/        MessageDispatcher, LoggingMessageDispatcher
+├── recipient/           RecipientHasher, RecipientHash, RecipientHashingProperties,
+│                        RecipientHashingConfiguration
+├── retention/           RetentionCleanupJob, ExpiredRowsCleaner, RetentionProperties,
+│                        RetentionConfiguration
 └── template/            EmailTemplate, EmailTemplateCatalog, RenderedEmail
     ├── definition/      EmailTemplateParser, EmailTemplateStructureChecker,
     │                    EmailTemplateDefinition, VariableDefinition, ListDefinition,
@@ -151,18 +158,20 @@ no.novari.communication
     └── loading/         ClasspathEmailTemplateLoader, EmailTemplateConfiguration
 ```
 
-| Pakke              | Ansvar                                                                                 |
-|--------------------|----------------------------------------------------------------------------------------|
-| `api`              | HTTP-inngangen. Tar imot kontrakten fra `model`, validerer og oversetter til domenet.  |
-| `api.validation`   | Validering av requesten mot reglene og mot malen. Samler opp alle feil.                |
-| `api.exceptions`   | Oversetter feil til ProblemDetail-responser (RFC 9457).                                |
-| `message`          | Mottak av meldinger (`MessageService`).                                                |
-| `message.domain`   | Den interne domenemodellen. Kanal-agnostisk på toppnivå.                               |
-| `message.dispatch` | Porten for å levere en akseptert melding videre, og dagens implementasjon av den.      |
-| `template`         | Ferdig lastede maler og rendering.                                                     |
-| `template.definition` | Lesing og kontroll av malfiler.                                                     |
-| `template.loading` | Finner malene på classpath og registrerer katalogen som Spring-bean.                   |
-| `config`           | Felles Spring-konfigurasjon (`Clock`).                                                 |
+| Pakke                 | Ansvar                                                                                       |
+|-----------------------|----------------------------------------------------------------------------------------------|
+| `api`                 | HTTP-inngangen. Tar imot kontrakten fra `model`, validerer og oversetter til domenet.        |
+| `api.validation`      | Validering av requesten mot reglene og mot malen. Samler opp alle feil.                      |
+| `api.exceptions`      | Oversetter feil til ProblemDetail-responser (RFC 9457).                                      |
+| `message`             | Mottak av meldinger (`MessageService`).                                                      |
+| `message.domain`      | Den interne domenemodellen. Kanal-agnostisk på toppnivå.                                     |
+| `message.dispatch`    | Porten for å levere en akseptert melding videre, og dagens implementasjon av den.            |
+| `recipient`           | Pseudonymisering av mottakere: HMAC-SHA256 av normalisert adresse med hemmelig nøkkel.       |
+| `retention`           | Planlagt opprydning av utløpte rader. Hver tabell registrerer sin egen `ExpiredRowsCleaner`. |
+| `template`            | Ferdig lastede maler og rendering.                                                           |
+| `template.definition` | Lesing og kontroll av malfiler.                                                              |
+| `template.loading`    | Finner malene på classpath og registrerer katalogen som Spring-bean.                         |
+| `config`              | Felles Spring-konfigurasjon (`Clock`).                                                       |
 
 Domenet (`message.domain`) avhenger ikke av `api`, `template` eller Spring. Fra `model` bruker
 domenet bare `Tenant`, slik at samme navn brukes i kontrakten, logger og senere i database og
@@ -285,11 +294,11 @@ Repoet er et Gradle-multimodulprosjekt. Modulene er kodestruktur, ikke C4-contai
 API-applikasjonen på nivå 2, mens `client` og `model` er biblioteker som kjører inne i
 konsument-applikasjonen.
 
-| Modul    | Innhold                                                          | Publiseres                            |
-|----------|------------------------------------------------------------------|---------------------------------------|
-| `app`    | Spring Boot-tjenesten: API, validering, maler og meldingsflyt.   | Nei, deployes som container-image     |
+| Modul    | Innhold                                                                                                                                                                     | Publiseres                            |
+|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------|
+| `app`    | Spring Boot-tjenesten: API, validering, maler og meldingsflyt.                                                                                                              | Nei, deployes som container-image     |
 | `model`  | API-kontrakten (`SendMessageRequest`, `Message`, `EmailMessage`, `Tenant`, `MessageAcceptedResponse`). Bare `jackson-annotations`, og bare ved kompilering (`compileOnly`). | `no.novari:fint-communication-model`  |
-| `client` | HTTP-klient for API-et, blokkerende (`RestClient`) og reactive (`WebClient`). | `no.novari:fint-communication-client` |
+| `client` | HTTP-klient for API-et, blokkerende (`RestClient`) og reactive (`WebClient`).                                                                                               | `no.novari:fint-communication-client` |
 
 ```mermaid
 flowchart LR
@@ -382,7 +391,8 @@ sequenceDiagram
 
 `MessageDispatcher` er porten mellom mottak og leveranse. Dagens implementasjon,
 `LoggingMessageDispatcher`, logger `id`, `tenant`, `channel` og `templateId` og forkaster meldingen.
-Det finnes ennå ingen persistering, kø eller leverandøradapter.
+Databasen finnes, men meldinger lagres ikke ennå (FFS-2337), og det finnes ingen kø eller
+leverandøradapter.
 
 ```mermaid
 flowchart LR
@@ -395,16 +405,16 @@ Controller og service endres ikke når implementasjonen byttes ut.
 
 ### Validering
 
-| Felt                      | Regel                                                                        |
-|---------------------------|------------------------------------------------------------------------------|
-| `tenant`                  | Påkrevd, én av verdiene i `Tenant` (f.eks. `ROGALAND`). Sjekkes av Jackson; ukjent verdi gir 400 med liste over gyldige verdier. |
-| `message`                 | Påkrevd. Sjekkes av Jackson.                                                 |
-| `message.channel`         | Påkrevd, én av kanalene i `@JsonSubTypes` (i dag `EMAIL`). Sjekkes av Jackson; manglende eller ukjent verdi gir 400 med liste over gyldige verdier. |
-| `message.to`              | Påkrevd, én adresse uten visningsnavn, domene med punktum, maks 254 tegn (RFC 5321). |
-| `message.templateId`      | Påkrevd, formatet `<team>/<mal>`, malen må finnes.                           |
-| `message.variables`       | Nøyaktig de variablene malen deklarerer.                                     |
-| `message.lists`           | Nøyaktig de listene malen deklarerer, mellom 1 og `maxItems` elementer.      |
-| Hver verdi                | Ikke blank, ingen linjeskift eller andre kontrolltegn, maks `maxLength` tegn. |
+| Felt                 | Regel                                                                                                                                               |
+|----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `tenant`             | Påkrevd, én av verdiene i `Tenant` (f.eks. `ROGALAND`). Sjekkes av Jackson; ukjent verdi gir 400 med liste over gyldige verdier.                    |
+| `message`            | Påkrevd. Sjekkes av Jackson.                                                                                                                        |
+| `message.channel`    | Påkrevd, én av kanalene i `@JsonSubTypes` (i dag `EMAIL`). Sjekkes av Jackson; manglende eller ukjent verdi gir 400 med liste over gyldige verdier. |
+| `message.to`         | Påkrevd, én adresse uten visningsnavn, domene med punktum, maks 254 tegn (RFC 5321).                                                                |
+| `message.templateId` | Påkrevd, formatet `<team>/<mal>`, malen må finnes.                                                                                                  |
+| `message.variables`  | Nøyaktig de variablene malen deklarerer.                                                                                                            |
+| `message.lists`      | Nøyaktig de listene malen deklarerer, mellom 1 og `maxItems` elementer.                                                                             |
+| Hver verdi           | Ikke blank, ingen linjeskift eller andre kontrolltegn, maks `maxLength` tegn.                                                                       |
 
 ## Feilhåndtering
 
@@ -435,14 +445,14 @@ sequenceDiagram
     end
 ```
 
-| Status | Når                                                     | Innhold                                              |
-|--------|---------------------------------------------------------|------------------------------------------------------|
-| 202    | Requesten er gyldig og meldingen akseptert.             | `{"id": "<uuid>"}`                                   |
-| 400    | Ugyldig JSON, feil type eller brudd på valideringsregler. | `detail` og `errors: [{field, message}]`           |
-| 401    | Mangler eller ugyldig token. **Planlagt** (FFS-1970).   | ProblemDetail                                        |
-| 405    | Annen HTTP-metode enn POST.                             | ProblemDetail                                        |
-| 415    | Body er ikke `application/json`.                        | ProblemDetail                                        |
-| 500    | Uventet feil.                                           | Generell melding; stacktracen logges, men returneres ikke. |
+| Status | Når                                                       | Innhold                                                    |
+|--------|-----------------------------------------------------------|------------------------------------------------------------|
+| 202    | Requesten er gyldig og meldingen akseptert.               | `{"id": "<uuid>"}`                                         |
+| 400    | Ugyldig JSON, feil type eller brudd på valideringsregler. | `detail` og `errors: [{field, message}]`                   |
+| 401    | Mangler eller ugyldig token. **Planlagt** (FFS-1970).     | ProblemDetail                                              |
+| 405    | Annen HTTP-metode enn POST.                               | ProblemDetail                                              |
+| 415    | Body er ikke `application/json`.                          | ProblemDetail                                              |
+| 500    | Uventet feil.                                             | Generell melding; stacktracen logges, men returneres ikke. |
 
 Eksempel på 400:
 
@@ -541,26 +551,26 @@ kontrollen, så feilen oppdages i CI før deploy.
 
 Kontrollen gjøres av `EmailTemplateStructureChecker` med en egen gjennomgang av Mustache-taggene.
 
-| Regel                                                                       | Hvorfor                                               |
-|-----------------------------------------------------------------------------|-------------------------------------------------------|
-| Variabler er påkrevde strenger med `maxLength` mellom 1 og 1000.            | Ingen variabel kan i praksis gjøre malen til fritekst. |
-| Lister har `maxItems` mellom 1 og 100 og minst ett felt.                    | Øvre grense for innhold kan regnes ut og ses i review. |
-| Lister brukes bare som section, og inne i en liste bare listens egne felt.  | Valideringen av requesten blir eksakt.                |
-| Alt som er deklarert, brukes, og alt som brukes, er deklarert.              | Malen og definisjonen kan ikke komme ut av takt.      |
+| Regel                                                                                                      | Hvorfor                                                     |
+|------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------|
+| Variabler er påkrevde strenger med `maxLength` mellom 1 og 1000.                                           | Ingen variabel kan i praksis gjøre malen til fritekst.      |
+| Lister har `maxItems` mellom 1 og 100 og minst ett felt.                                                   | Øvre grense for innhold kan regnes ut og ses i review.      |
+| Lister brukes bare som section, og inne i en liste bare listens egne felt.                                 | Valideringen av requesten blir eksakt.                      |
+| Alt som er deklarert, brukes, og alt som brukes, er deklarert.                                             | Malen og definisjonen kan ikke komme ut av takt.            |
 | Ikke tillatt: `{{{ }}}`, `{{& }}`, inverterte sections, partials, nøstede sections, endring av delimitere. | Alle verdier escapes, og strukturen er enkel å kontrollere. |
-| `subject` er én linje uten sections.                                        | Emnet er ren tekst.                                   |
-| `replyTo` er en gyldig adresse hvis den er satt.                            |                                                       |
-| Navn har formen `antallFeil` (bokstav først, deretter bokstaver og tall).   | Unngår JMustaches spesialsyntaks (`a.b`, `-first`).   |
+| `subject` er én linje uten sections.                                                                       | Emnet er ren tekst.                                         |
+| `replyTo` er en gyldig adresse hvis den er satt.                                                           |                                                             |
+| Navn har formen `antallFeil` (bokstav først, deretter bokstaver og tall).                                  | Unngår JMustaches spesialsyntaks (`a.b`, `-first`).         |
 
 ### Rendering
 
 JMustache brukes direkte (ikke `spring-boot-starter-mustache`, som også setter opp
 MVC-visninger).
 
-| Del          | Escaping | Konsekvens                                                |
-|--------------|----------|-----------------------------------------------------------|
-| `body.html`  | HTML     | `<script>` i en verdi blir `&lt;script&gt;`.              |
-| `subject`    | Ingen    | Emnet er ren tekst. Linjeskift er umulig fordi verdier ikke kan inneholde kontrolltegn. |
+| Del         | Escaping | Konsekvens                                                                              |
+|-------------|----------|-----------------------------------------------------------------------------------------|
+| `body.html` | HTML     | `<script>` i en verdi blir `&lt;script&gt;`.                                            |
+| `subject`   | Ingen    | Emnet er ren tekst. Linjeskift er umulig fordi verdier ikke kan inneholde kontrolltegn. |
 
 Lister rendres ved at blokken mellom `{{#liste}}` og `{{/liste}}` gjentas for hvert element:
 
@@ -585,60 +595,115 @@ stateDiagram-v2
 I dag opprettes alle meldinger med status `RECEIVED`, og det finnes ingen overganger. Overganger,
 og om `FAILED` skal kunne prøves på nytt, avgjøres sammen med leveransen i FFS-1968.
 
+## Database
+
+Tjenesten har en egen Postgres-database, `fint-common`, som Flais setter opp fra `spec.database` i
+`flais.yaml`. Tabeller som gjelder én tenant får `tenant_id`.
+
+| Del        | Løsning                                                                                   |
+|------------|-------------------------------------------------------------------------------------------|
+| Tilgang    | Spring Data JDBC. Egen SQL skrives med `JdbcClient`.                                      |
+| Skjema     | Flyway, `classpath:db/migration`, kjøres ved oppstart. `V1__baseline` er tom.             |
+| Readiness  | `db` er med i readiness-gruppen; podden tas ut av trafikk når databasen ikke svarer.      |
+| Opprydning | `RetentionCleanupJob` kjører kl. 03.15 (Europe/Oslo) og kaller hver `ExpiredRowsCleaner`. |
+| Retensjon  | Metadata om meldinger beholdes i 60 dager (`communication.retention.metadata`).           |
+
+Planlagte tabeller:
+
+| Oppgave  | Innhold                                       |
+|----------|-----------------------------------------------|
+| FFS-2333 | Tellere per mottaker (hashet).                |
+| FFS-2334 | Tellere per tenant og totalt.                 |
+| FFS-2336 | Blokkeringsliste (hashet mottaker).           |
+| FFS-2337 | `message`-tabellen med status.                |
+
+### Mottaker-hashing
+
+Mottakeradresser lagres aldri i klartekst. `RecipientHasher` normaliserer adressen (`trim`,
+`lowercase`) og beregner HMAC-SHA256 med en hemmelig nøkkel. Resultatet (`RecipientHash`) er 64
+hex-tegn og brukes som nøkkel i tabellene som trenger å kjenne igjen en mottaker.
+
+```mermaid
+flowchart LR
+    adr["Adresse<br/>'  Ola@RogFK.no '"] --> norm["Normalisert<br/>'ola@rogfk.no'"]
+    norm --> hmac["HMAC-SHA256<br/>(nøkkel fra 1Password)"]
+    hmac --> hash["RecipientHash<br/>64 hex-tegn"]
+    hash --> db[("Database")]
+```
+
+| Egenskap         | Verdi                                                                                    |
+|------------------|------------------------------------------------------------------------------------------|
+| Nøkkel           | `COMMUNICATION_RECIPIENT_HASHING_KEY`, base64, minst 32 bytes. Fra 1Password-operatoren. |
+| Mangler nøkkelen | Oppstarten feiler med en melding som nevner variabelnavnet, aldri verdien.               |
+| Logging          | Verken nøkkel, adresse eller hash logges. `toString()` maskerer.                         |
+| Nøkkelrotasjon   | Ikke støttet. Se under.                                                                  |
+
+Hashen kan ikke regnes om uten klartekstadressen, som tjenesten ikke har. Et nøkkelbytte gjør
+derfor alle lagrede hasher ugjenkjennelige. Tellerne (FFS-2333/2334) lever bare i timer eller dager
+og tåler det. Blokkeringslisten (FFS-2336) gjør ikke det, så hvis rotasjon blir aktuelt, må den få
+`key_id` og oppslag med både gammel og ny nøkkel. Dette er et åpent punkt for FFS-2336.
+
 ## Personvern og logging
 
 Mottaker, emne, innhold og variabelverdier kan inneholde personopplysninger.
 
-| Tiltak                                                                                     | Hvor                                            |
-|--------------------------------------------------------------------------------------------|-------------------------------------------------|
-| Klienter kan ikke sende fritekst; alt innhold kommer fra gjennomgåtte maler.               | Malsystemet                                     |
-| `toString()` maskerer mottaker, emne, innhold og verdier.                                  | `EmailMessage`, `EmailPayload`, `RenderedEmail` |
-| Feilmeldinger gjentar aldri innsendte verdier. Navn tas bare med når de har formen til et variabelnavn. | `SendMessageRequestValidator`        |
-| Jacksons feilmeldinger, som kan sitere verdier, brukes ikke i respons eller logg; bare JSON-stien. | `GlobalExceptionHandler`                 |
-| Loggen ved mottak inneholder bare `id`, `tenant`, `channel` og `templateId`.               | `LoggingMessageDispatcher`                      |
+| Tiltak                                                                                                  | Hvor                                            |
+|---------------------------------------------------------------------------------------------------------|-------------------------------------------------|
+| Klienter kan ikke sende fritekst; alt innhold kommer fra gjennomgåtte maler.                            | Malsystemet                                     |
+| `toString()` maskerer mottaker, emne, innhold og verdier.                                               | `EmailMessage`, `EmailPayload`, `RenderedEmail` |
+| Feilmeldinger gjentar aldri innsendte verdier. Navn tas bare med når de har formen til et variabelnavn. | `SendMessageRequestValidator`                   |
+| Jacksons feilmeldinger, som kan sitere verdier, brukes ikke i respons eller logg; bare JSON-stien.      | `GlobalExceptionHandler`                        |
+| Loggen ved mottak inneholder bare `id`, `tenant`, `channel` og `templateId`.                            | `LoggingMessageDispatcher`                      |
+| Mottakere lagres bare som HMAC-hash. Nøkkel, adresse og hash logges aldri.                              | `RecipientHasher`                               |
+| En test sjekker at adressen ikke finnes i logg, i noen tekstkolonne i databasen eller i metrikk-tagger. | `RecipientPrivacyTest`                          |
 
 `replyTo` kommer fra malen og er en Novari-adresse, så den vises umaskert.
 
 ## Drift
 
-| Egenskap      | Verdi                                                                 |
-|---------------|-----------------------------------------------------------------------|
-| Image         | `ghcr.io/fintlabs/fint-communication-service`, distroless Java 25     |
-| Namespace     | `fintlabs-no` (én deployment for alle tenants)                        |
-| Eksponering   | Bare intern i clusteret (ingen ingress)                               |
-| Port          | 8080                                                                  |
-| Probes        | `/actuator/health` (startup), `/actuator/health/liveness`, `/actuator/health/readiness` |
-| Ressurser     | 256–512 Mi minne, 50–500m CPU, 1 replika                              |
-| Miljøer       | beta (`aks-beta-fint-2021-11-23`). Produksjon (`api`) er ikke satt opp. |
-| Bygg/deploy   | Push til `main` bygger image og deployer til beta (GitHub Actions).   |
+| Egenskap      | Verdi                                                                                                                                                       |
+|---------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Image         | `ghcr.io/fintlabs/fint-communication-service`, distroless Java 25                                                                                           |
+| Namespace     | `fintlabs-no` (én deployment for alle tenants)                                                                                                              |
+| Eksponering   | Bare intern i clusteret (ingen ingress)                                                                                                                     |
+| Port          | 8080                                                                                                                                                        |
+| Probes        | `/actuator/health` (startup), `/actuator/health/liveness`, `/actuator/health/readiness`                                                                     |
+| Ressurser     | 256–512 Mi minne, 50–500m CPU, 1 replika                                                                                                                    |
+| Database      | Postgres `fint-common` via Flais (`spec.database`). Readiness inkluderer `db`.                                                                              |
+| Hemmeligheter | 1Password-item via `spec.onePassword.itemPath` (beta: `vaults/aks-beta-vault/items/fint-communication-service`), med `COMMUNICATION_RECIPIENT_HASHING_KEY`. |
+| Miljøer       | beta (`aks-beta-fint-2021-11-23`). Produksjon (`api`) er ikke satt opp.                                                                                     |
+| Bygg/deploy   | Push til `main` bygger image og deployer til beta (GitHub Actions).                                                                                         |
 
-Tjenesten har ingen tilstand mellom requester, så den kan skaleres horisontalt uten endringer.
+All tilstand ligger i databasen, så API-applikasjonen kan skaleres horisontalt. Opprydningsjobben
+kjører da på hver replika; slettingene er idempotente, så det gjør ingen skade.
 
 ## Videre utvikling
 
-| Oppgave  | Innhold                                                                          |
-|----------|----------------------------------------------------------------------------------|
-| FFS-1968 | `EmailAdapter` mot ACS, asynkron utsending, statusoverganger.                     |
-| FFS-1969 | Sentral layout rundt rendret innhold, `text/plain`-variant, HTML-regler for maler. |
-| FFS-1970 | Bearer-token fra NAM (Spring Security), 401 som ProblemDetail.                    |
-| FFS-1971 | JSON-logging, korrelasjon-ID, metrics til Prometheus.                             |
-| Fase 6   | Kafka som sekundær inngang, med samme validering og mottak som REST.               |
-
-Når det kommer persistering, er planen en egen Postgres-database (`fint-common`) med `tenant_id` i
-tabellene som trenger det.
+| Oppgave       | Innhold                                                                            |
+|---------------|------------------------------------------------------------------------------------|
+| FFS-1968      | `EmailAdapter` mot ACS, asynkron utsending, statusoverganger.                      |
+| FFS-1969      | Sentral layout rundt rendret innhold, `text/plain`-variant, HTML-regler for maler. |
+| FFS-1970      | Bearer-token fra NAM (Spring Security), 401 som ProblemDetail.                     |
+| FFS-1971      | JSON-logging, korrelasjon-ID, metrics til Prometheus.                              |
+| FFS-2333–2337 | Grenser per mottaker og tenant, blokkeringsliste og meldingsstatus i databasen.    |
+| Fase 6        | Kafka som sekundær inngang, med samme validering og mottak som REST.               |
 
 ## Sentrale beslutninger
 
-| Beslutning                                                        | Begrunnelse                                                                 |
-|-------------------------------------------------------------------|------------------------------------------------------------------------------|
-| All e-post sendes via mal; ingen fritekst.                        | Begrenser risikoen for personopplysninger i e-post; alt innhold gjennomgås i PR. |
-| Maler er knyttet til kanal (`<team>/<kanal>/<mal>`).              | Formatene er forskjellige per kanal; egne typer per kanal i koden.          |
-| Team først i stien.                                               | Én CODEOWNERS-linje per team.                                               |
-| Variabler er strenger; lister er typet med `maxItems` og felt.    | Øvre grense for innhold kan regnes ut; tall og datoer formateres av klienten. |
-| `replyTo` defineres i malen, ikke i requesten.                    | Ingen risiko for personlige adresser som svaradresse.                       |
-| Polymorf kontrakt (`{tenant, message: {channel, ...}}`) med sealed `Message`. | Nøyaktig én melding følger av typen; nye kanaler er nye subtyper uten brudd i kontrakten. |
-| Malen rendres ved mottak.                                         | Feil blir 400 med en gang; meldingen er uavhengig av senere malendringer.   |
-| ProblemDetail (RFC 9457) for alle feil.                           | Standardformat, støttet direkte av Spring.                                  |
-| JMustache direkte, egen kontroll av taggene.                      | Logic-less maler; reglene kan håndheves ved oppstart.                       |
-| Port (`MessageDispatcher`) mellom mottak og leveranse.            | Leveransen kan byttes ut uten å endre API eller service.                    |
-| `model` uten avhengigheter ved kjøring (bare `compileOnly` `jackson-annotations`), `client` uten autokonfigurasjon. | Bibliotekene kan brukes i alle Spring Boot 3- og 4-applikasjoner (Jackson 2 og 3). |
+| Beslutning                                                                                                          | Begrunnelse                                                                                                  |
+|---------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
+| All e-post sendes via mal; ingen fritekst.                                                                          | Begrenser risikoen for personopplysninger i e-post; alt innhold gjennomgås i PR.                             |
+| Maler er knyttet til kanal (`<team>/<kanal>/<mal>`).                                                                | Formatene er forskjellige per kanal; egne typer per kanal i koden.                                           |
+| Team først i stien.                                                                                                 | Én CODEOWNERS-linje per team.                                                                                |
+| Variabler er strenger; lister er typet med `maxItems` og felt.                                                      | Øvre grense for innhold kan regnes ut; tall og datoer formateres av klienten.                                |
+| `replyTo` defineres i malen, ikke i requesten.                                                                      | Ingen risiko for personlige adresser som svaradresse.                                                        |
+| Polymorf kontrakt (`{tenant, message: {channel, ...}}`) med sealed `Message`.                                       | Nøyaktig én melding følger av typen; nye kanaler er nye subtyper uten brudd i kontrakten.                    |
+| Malen rendres ved mottak.                                                                                           | Feil blir 400 med en gang; meldingen er uavhengig av senere malendringer.                                    |
+| ProblemDetail (RFC 9457) for alle feil.                                                                             | Standardformat, støttet direkte av Spring.                                                                   |
+| JMustache direkte, egen kontroll av taggene.                                                                        | Logic-less maler; reglene kan håndheves ved oppstart.                                                        |
+| Port (`MessageDispatcher`) mellom mottak og leveranse.                                                              | Leveransen kan byttes ut uten å endre API eller service.                                                     |
+| `model` uten avhengigheter ved kjøring (bare `compileOnly` `jackson-annotations`), `client` uten autokonfigurasjon. | Bibliotekene kan brukes i alle Spring Boot 3- og 4-applikasjoner (Jackson 2 og 3).                           |
+| Spring Data JDBC, ikke JPA.                                                                                         | Immutable Kotlin-klasser uten proxies. Tellere (`INSERT … ON CONFLICT`) og opprydning er native SQL uansett. |
+| Mottakere lagres som HMAC-SHA256 med hemmelig nøkkel, ikke ren SHA-256.                                             | E-postadresser er lette å gjette; uten nøkkelen kan hashen ikke slås opp mot en liste med adresser.          |
+| Ingen nøkkelrotasjon foreløpig.                                                                                     | Ingen tabeller trenger det ennå; blokkeringslisten (FFS-2336) må ta stilling til det.                        |
+| Opprydning uten ShedLock.                                                                                           | Slettingene er idempotente; samtidige kjøringer på flere replikaer gjør ingen skade.                         |

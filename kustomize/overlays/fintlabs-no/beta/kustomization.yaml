@@ -4,3 +4,12 @@ namespace: fintlabs-no
 
 resources:
   - ../../../base
+
+patches:
+  - patch: |-
+      - op: replace
+        path: "/spec/onePassword/itemPath"
+        value: "vaults/aks-beta-vault/items/fint-communication-service"
+    target:
+      kind: Application
+      name: fint-communication-service

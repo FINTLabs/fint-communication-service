@@ -15,7 +15,8 @@ Se [docs/architecture.md](docs/architecture.md) for arkitektur, dataflyt og sekv
 ## Status
 
 `POST /api/v1/messages` tar imot e-post basert på maler og svarer `202 Accepted` med en
-meldings-ID. Meldingen sendes ikke ennå. Layout, leverandøradapter og autentisering kommer i
+meldings-ID. Meldingen sendes ikke ennå. Databasen og mottaker-hashing er på plass, men ingen
+tabeller er tatt i bruk ennå. Layout, leverandøradapter og autentisering kommer i
 egne oppgaver under [FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
 
 ## Moduler
@@ -114,7 +115,7 @@ Regler, som sjekkes ved oppstart og i testene:
 
 ## Lokal utvikling
 
-Krever Java 25.
+Krever Java 25 og Docker. Testene og lokal kjøring starter Postgres med Testcontainers.
 
 ```bash
 ./gradlew check
@@ -124,8 +125,22 @@ Krever Java 25.
 med Jackson 2 (`:client:test`) og Spring Framework 7 med Jackson 3 (`:client:testSpring7`).
 
 ```bash
-./gradlew :app:bootRun
+./gradlew :app:bootTestRun
 ```
+
+`bootTestRun` starter appen med en Postgres-container og en testnøkkel for mottaker-hashing.
+
+## Konfigurasjon
+
+| Variabel                              | Innhold                                                                |
+|---------------------------------------|------------------------------------------------------------------------|
+| `fint.database.url`, `fint.database.username`, `fint.database.password` | Settes av Flais fra `spec.database` (`fint-common`). |
+| `COMMUNICATION_RECIPIENT_HASHING_KEY` | HMAC-nøkkel for mottaker-hashing, base64, minst 32 bytes. Fra 1Password. Oppstarten feiler uten den. |
+
+Ny nøkkel lages med `openssl rand -base64 32`. Bytter man nøkkel, kjenner tjenesten ikke lenger igjen
+mottakere som er lagret fra før; se [Database](docs/architecture.md#database).
+
+Flyway kjører migreringene i `app/src/main/resources/db/migration` ved oppstart.
 
 ## Bruk av klienten
 
@@ -176,3 +191,6 @@ Opprett en GitHub-release med tag `vX.Y.Z`. `Publish to Reposilite`-workflowen p
 
 Push til `main` bygger image (CI) og deployer til beta (CD). `MD`-workflowen bygger og deployer
 manuelt. Produksjon (`api`) er ikke satt opp ennå.
+
+Beta henter hemmeligheter fra 1Password-itemet `vaults/aks-beta-vault/items/fint-communication-service`,
+som må ha feltet `COMMUNICATION_RECIPIENT_HASHING_KEY`.
