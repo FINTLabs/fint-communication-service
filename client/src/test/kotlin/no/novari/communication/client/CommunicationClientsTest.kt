@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer
 import no.novari.communication.model.EmailMessage
 import no.novari.communication.model.MessageAcceptedResponse
 import no.novari.communication.model.SendMessageRequest
+import no.novari.communication.model.Tenant
 import org.skyscreamer.jsonassert.JSONAssert
 import org.springframework.http.client.reactive.JdkClientHttpConnector
 import org.springframework.web.client.HttpClientErrorException
@@ -22,24 +23,25 @@ class CommunicationClientsTest {
     private val messageId = UUID.fromString("0d6f7e0a-3c1b-4f53-9a35-0a4f8f7f2b11")
     private val request =
         SendMessageRequest(
-            tenant = "rogfk.no",
-            email =
+            tenant = Tenant.ROGALAND,
+            message =
                 EmailMessage(
                     to = "ola@rogfk.no",
-                    subject = "Emne",
-                    body = "Innhold",
-                    replyTo = "kari@rogfk.no",
+                    templateId = "flyt/integrasjonsfeil",
+                    variables = mapOf("antallFeil" to "3"),
+                    lists = mapOf("integrasjoner" to listOf(mapOf("navn" to "ACOS", "antall" to "3"))),
                 ),
         )
     private val expectedJson =
         """
         {
-          "tenant": "rogfk.no",
-          "email": {
+          "tenant": "ROGALAND",
+          "message": {
+            "channel": "EMAIL",
             "to": "ola@rogfk.no",
-            "subject": "Emne",
-            "body": "Innhold",
-            "replyTo": "kari@rogfk.no"
+            "templateId": "flyt/integrasjonsfeil",
+            "variables": { "antallFeil": "3" },
+            "lists": { "integrasjoner": [ { "navn": "ACOS", "antall": "3" } ] }
           }
         }
         """

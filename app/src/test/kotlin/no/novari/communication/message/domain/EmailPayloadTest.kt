@@ -1,4 +1,4 @@
-package no.novari.communication.message
+package no.novari.communication.message.domain
 
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
@@ -15,6 +15,14 @@ class EmailPayloadTest {
     @Test
     fun `replyTo is optional`() {
         assertThat(validPayload().replyTo).isNull()
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["", "   "])
+    fun `a blank templateId is rejected`(templateId: String) {
+        assertThatThrownBy { validPayload().copy(templateId = templateId) }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("templateId")
     }
 
     @ParameterizedTest
@@ -52,7 +60,7 @@ class EmailPayloadTest {
     @Test
     fun `toString masks recipient, subject and body since they may contain personal data`() {
         assertThat(validPayload().toString())
-            .startsWith("EmailPayload(to=***, subject=***, body=***,")
+            .startsWith("EmailPayload(templateId=team/mal, to=***, subject=***, body=***,")
             .doesNotContain("ola.nordmann", "Vedtak", "fødselsnummer")
     }
 
@@ -61,7 +69,7 @@ class EmailPayloadTest {
         val payload = validPayload().copy(replyTo = "no-reply@novari.no")
 
         assertThat(payload.toString())
-            .isEqualTo("EmailPayload(to=***, subject=***, body=***, replyTo=no-reply@novari.no)")
+            .isEqualTo("EmailPayload(templateId=team/mal, to=***, subject=***, body=***, replyTo=no-reply@novari.no)")
     }
 
     @Test
@@ -77,6 +85,7 @@ class EmailPayloadTest {
 
     private fun validPayload() =
         EmailPayload(
+            templateId = "team/mal",
             to = "ola.nordmann@rogfk.no",
             subject = "Vedtak i saken din",
             body = "Hei Ola, ditt fødselsnummer er registrert.",

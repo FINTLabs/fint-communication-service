@@ -2,25 +2,45 @@ package no.novari.communication.model
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNull
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class SendMessageRequestTest {
     @Test
-    fun `channel and replyTo are optional`() {
-        val request = SendMessageRequest(tenant = "rogfk.no")
-        val email = EmailMessage(to = "ola@rogfk.no", subject = "Emne", body = "Innhold")
+    fun `variables and lists are optional`() {
+        val email = EmailMessage(to = "ola@rogfk.no", templateId = "team/mal")
 
-        assertNull(request.email)
-        assertNull(email.replyTo)
+        assertTrue(email.variables.isEmpty())
+        assertTrue(email.lists.isEmpty())
     }
 
     @Test
     fun `requests with same content are equal`() {
-        val email = EmailMessage(to = "ola@rogfk.no", subject = "Emne", body = "Innhold", replyTo = "kari@rogfk.no")
+        val email = validEmail()
 
         assertEquals(
-            SendMessageRequest(tenant = "rogfk.no", email = email),
-            SendMessageRequest(tenant = "rogfk.no", email = email.copy()),
+            SendMessageRequest(tenant = Tenant.ROGALAND, message = email),
+            SendMessageRequest(tenant = Tenant.ROGALAND, message = email.copy()),
         )
     }
+
+    @Test
+    fun `toString does not expose recipient or values`() {
+        val text = validEmail().toString()
+
+        assertFalse(text.contains("ola@rogfk.no"))
+        assertFalse(text.contains("12345"))
+        assertFalse(text.contains("ACOS"))
+        assertTrue(text.contains("team/mal"))
+        assertTrue(text.contains("saksnummer"))
+        assertTrue(text.contains("integrasjoner"))
+    }
+
+    private fun validEmail() =
+        EmailMessage(
+            to = "ola@rogfk.no",
+            templateId = "team/mal",
+            variables = mapOf("saksnummer" to "12345"),
+            lists = mapOf("integrasjoner" to listOf(mapOf("navn" to "ACOS"))),
+        )
 }
