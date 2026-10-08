@@ -4,13 +4,18 @@ import com.fasterxml.jackson.annotation.JsonSubTypes
 import com.fasterxml.jackson.annotation.JsonTypeInfo
 import io.github.oshai.kotlinlogging.KotlinLogging
 import no.novari.communication.api.validation.ValidationError
+import no.novari.communication.limit.LimitExceededException
 import no.novari.communication.template.EmailTemplate
+import org.springframework.dao.DataAccessResourceFailureException
+import org.springframework.dao.PessimisticLockingFailureException
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.http.HttpStatusCode
 import org.springframework.http.ProblemDetail
 import org.springframework.http.ResponseEntity
 import org.springframework.http.converter.HttpMessageNotReadableException
+import org.springframework.transaction.CannotCreateTransactionException
+import org.springframework.transaction.TransactionSystemException
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.RestControllerAdvice
 import org.springframework.web.context.request.WebRequest
@@ -18,6 +23,8 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 import tools.jackson.core.JacksonException
 import tools.jackson.databind.exc.InvalidTypeIdException
 import tools.jackson.databind.exc.MismatchedInputException
+import java.sql.SQLException
+import java.time.Duration
 
 @RestControllerAdvice
 class GlobalExceptionHandler : ResponseEntityExceptionHandler() {
@@ -28,6 +35,46 @@ class GlobalExceptionHandler : ResponseEntityExceptionHandler() {
         log.warn { "Ugyldig request: ${exception.errors.joinToString { "${it.field} ${it.message}" }}" }
         return badRequest("Requesten inneholder ugyldige felt", exception.errors)
     }
+
+    @ExceptionHandler(LimitExceededException::class)
+    fun handleLimitExceeded(exception: LimitExceededException): ResponseEntity<ProblemDetail> {
+        log.warn {
+            "Grense overskredet grensetype=${exception.type.value} tenant=${exception.tenant} " +
+                "id=${exception.messageId.value}"
+        }
+        val problem =
+            ProblemDetail
+                .forStatusAndDetail(
+                    HttpStatus.TOO_MANY_REQUESTS,
+                    "Mottakeren har fått for mange meldinger. Prøv igjen senere.",
+                ).apply { setProperty("limit", exception.type.value) }
+        return ResponseEntity
+            .status(HttpStatus.TOO_MANY_REQUESTS)
+            .header(HttpHeaders.RETRY_AFTER, retryAfterSeconds(exception.retryAfter).toString())
+            .body(problem)
+    }
+
+    @ExceptionHandler(
+        CannotCreateTransactionException::class,
+        DataAccessResourceFailureException::class,
+        PessimisticLockingFailureException::class,
+    )
+    fun handleDatabaseUnavailable(exception: Exception): ProblemDetail {
+        log.error(exception) { "Databasen er utilgjengelig" }
+        return ProblemDetail.forStatusAndDetail(
+            HttpStatus.SERVICE_UNAVAILABLE,
+            "Tjenesten er midlertidig utilgjengelig",
+        )
+    }
+
+    // Når forbindelsen dør midt i en transaksjon, feiler også rollback, og Spring skjuler da den opprinnelige feilen.
+    @ExceptionHandler(TransactionSystemException::class)
+    fun handleTransactionFailure(exception: TransactionSystemException): ProblemDetail =
+        if (isConnectionFailure(exception.originalException) || isConnectionFailure(exception.cause)) {
+            handleDatabaseUnavailable(exception)
+        } else {
+            handleUnexpected(exception)
+        }
 
     override fun handleHttpMessageNotReadable(
         ex: HttpMessageNotReadableException,
@@ -55,6 +102,15 @@ class GlobalExceptionHandler : ResponseEntityExceptionHandler() {
         log.error(exception) { "Uventet feil ved behandling av request" }
         return ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "Det oppstod en uventet feil")
     }
+
+    private fun isConnectionFailure(exception: Throwable?): Boolean =
+        generateSequence(exception) { it.cause }.any {
+            it is DataAccessResourceFailureException ||
+                (it as? SQLException)?.sqlState?.startsWith(CONNECTION_EXCEPTION_SQL_STATE_CLASS) == true
+        }
+
+    private fun retryAfterSeconds(retryAfter: Duration): Long =
+        retryAfter.plusNanos(NANOS_PER_SECOND - 1).seconds.coerceAtLeast(1)
 
     private fun badRequest(
         detail: String,
@@ -96,5 +152,10 @@ class GlobalExceptionHandler : ResponseEntityExceptionHandler() {
                     else -> ".*"
                 }
             }.removePrefix(".")
+    }
+
+    private companion object {
+        const val NANOS_PER_SECOND = 1_000_000_000L
+        const val CONNECTION_EXCEPTION_SQL_STATE_CLASS = "08"
     }
 }
