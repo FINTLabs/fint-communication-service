@@ -1,0 +1,4 @@
+description: Eksempel
+subject: "Hei {{navn}}"
+variables:
+  navn: { maxLength: 20 }

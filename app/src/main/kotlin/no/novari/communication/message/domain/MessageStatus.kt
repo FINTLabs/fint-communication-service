@@ -1,4 +1,4 @@
-package no.novari.communication.message
+package no.novari.communication.message.domain
 
 enum class MessageStatus {
     RECEIVED,

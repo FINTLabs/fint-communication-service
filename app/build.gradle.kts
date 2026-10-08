@@ -26,10 +26,14 @@ sourceSets {
 }
 
 dependencies {
+    implementation(project(":model"))
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation("tools.jackson.module:jackson-module-kotlin")
+    implementation("tools.jackson.dataformat:jackson-dataformat-yaml")
+    implementation("com.samskivert:jmustache")
+    implementation("io.github.oshai:kotlin-logging-jvm:8.0.4")
 
     testImplementation("org.springframework.boot:spring-boot-starter-actuator-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")

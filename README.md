@@ -6,33 +6,111 @@ leverandør. E-post er første kanal; SMS, Slack og webhooks skal kunne legges t
 endring i grunnarkitekturen.
 
 Tjenesten er én multi-tenant deployment i namespace `fintlabs-no`, kun tilgjengelig internt i
-clusteret. Tenant er fylket meldingen sendes på vegne av.
+clusteret. Tenant er organisasjonen meldingen sendes på vegne av: et fylke, Oslo kommune
+(Bymiljøetaten), Riksantikvaren eller Novari (til testing). Gyldige tenants er definert i enumen
+`Tenant` i `model`, og sendes som enum-navnet (f.eks. `"ROGALAND"`).
+
+Se [docs/architecture.md](docs/architecture.md) for arkitektur, dataflyt og sekvenser.
 
 ## Status
 
-Grunnstruktur: Spring Boot 4-applikasjon med health-endepunkter, bygg og deploy til beta.
-REST API, layout, leverandøradapter og autentisering kommer i egne oppgaver under
-[FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
+`POST /api/v1/messages` tar imot e-post basert på maler og svarer `202 Accepted` med en
+meldings-ID. Meldingen sendes ikke ennå. Layout, leverandøradapter og autentisering kommer i
+egne oppgaver under [FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
 
 ## Moduler
 
 | Modul    | Innhold                                                        | Artifact                              |
 |----------|----------------------------------------------------------------|---------------------------------------|
 | `app`    | Spring Boot-tjenesten (API og motor). Deployes, releases ikke. | –                                     |
-| `model`  | API-kontrakten (request/response), uten avhengigheter.         | `no.novari:fint-communication-model`  |
+| `model`  | API-kontrakten (request/response). Bare Jackson-annotasjoner, og bare ved kompilering. | `no.novari:fint-communication-model`  |
 | `client` | HTTP-klient for APIet, blokkerende og reactive.                | `no.novari:fint-communication-client` |
 
 `model` og `client` er kompilert for Java 21 og fungerer med både Spring Boot 3 og 4.
-Kontrakten for `POST /api/v1/messages` er et utkast frem til endepunktet implementeres i
-[FFS-1967](https://novari-iks.atlassian.net/browse/FFS-1967).
 
 ## Endepunkter
 
 | Endepunkt                     | Bruk                    |
 |-------------------------------|-------------------------|
+| `POST /api/v1/messages`       | Send melding            |
 | `/actuator/health`            | Startup-probe           |
 | `/actuator/health/liveness`   | Liveness-probe          |
 | `/actuator/health/readiness`  | Readiness-probe         |
+
+## Sende melding
+
+All e-post sendes via en mal. Klienten oppgir mal, mottaker og verdiene til malens variabler,
+men aldri emne eller innhold. `channel` bestemmer meldingstypen; i dag støttes bare `EMAIL`.
+
+```json
+{
+  "tenant": "ROGALAND",
+  "message": {
+    "channel": "EMAIL",
+    "to": "ola@rogfk.no",
+    "templateId": "flyt/integrasjonsfeil",
+    "variables": { "antallFeil": "8", "fra": "06.10.2026 kl. 09.00", "til": "06.10.2026 kl. 12.00" },
+    "lists": {
+      "integrasjoner": [
+        { "navn": "ACOS", "antallFeil": "3" },
+        { "navn": "eGrunnerverv", "antallFeil": "4" },
+        { "navn": "eApply", "antallFeil": "1" }
+      ]
+    }
+  }
+}
+```
+
+Eksemplene viser en tenkt mal. Repoet inneholder foreløpig ingen maler; innholdet i de første
+malene er ikke bestemt.
+
+Gyldig request gir `202 Accepted` med `{"id": "<uuid>"}`. Ugyldig request gir `400` som
+`application/problem+json` (RFC 9457), med ett element i `errors` per ugyldig felt. Meldingene
+gjentar aldri verdiene som ble sendt inn.
+
+```json
+{
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "Requesten inneholder ugyldige felt",
+  "instance": "/api/v1/messages",
+  "errors": [{ "field": "message.variables.antallFeil", "message": "kan ikke være lengre enn 6 tegn" }]
+}
+```
+
+## Maler
+
+Malene ligger i `app/src/main/resources/templates/<team>/email/<mal>/`, og mal-ID-en er
+`<team>/<mal>`. Hvert team eier sin mappe via `.github/CODEOWNERS`, og nye maler godkjennes
+gjennom PR.
+
+`template.yaml` beskriver malen:
+
+```yaml
+description: Hva malen brukes til
+subject: "Flyt: {{antallFeil}} feil på integrasjoner"
+replyTo: no-reply@novari.no   # valgfri
+variables:
+  antallFeil: { maxLength: 6 }
+lists:
+  integrasjoner:
+    maxItems: 100
+    fields:
+      navn: { maxLength: 100 }
+```
+
+`body.html` inneholder selve innholdet i Mustache. Layout rundt innholdet legges på sentralt.
+
+Regler, som sjekkes ved oppstart og i testene:
+
+- Alle variabler er påkrevde strenger med `maxLength` (høyst 1000). Verdier kan ikke inneholde
+  linjeskift eller andre kontrolltegn.
+- Lister brukes bare som section (`{{#integrasjoner}}…{{/integrasjoner}}`). De har `maxItems`
+  (høyst 100), minst ett element, og inne i listen kan bare listens egne felt brukes.
+- Alt som er deklarert, må brukes, og alt som brukes, må være deklarert.
+- Ikke tillatt: `{{{ }}}`, `{{& }}`, inverterte sections, partials, nøstede sections og
+  endring av delimitere.
+- Verdier HTML-escapes i `body.html`. `subject` er ren tekst og må være én linje.
 
 ## Lokal utvikling
 
@@ -70,8 +148,14 @@ val client = CommunicationClients.create(restClientBuilder.baseUrl(baseUrl).buil
 val response =
     client.send(
         SendMessageRequest(
-            tenant = "rogfk.no",
-            email = EmailMessage(to = "ola@rogfk.no", subject = "Emne", body = "Innhold"),
+            tenant = Tenant.ROGALAND,
+            message =
+                EmailMessage(
+                    to = "ola@rogfk.no",
+                    templateId = "flyt/integrasjonsfeil",
+                    variables = mapOf("antallFeil" to "8", "fra" to "06.10.2026 kl. 09.00", "til" to "06.10.2026 kl. 12.00"),
+                    lists = mapOf("integrasjoner" to listOf(mapOf("navn" to "ACOS", "antallFeil" to "8"))),
+                ),
         ),
     )
 ```

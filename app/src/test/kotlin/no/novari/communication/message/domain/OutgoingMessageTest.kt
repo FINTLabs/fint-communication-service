@@ -1,5 +1,6 @@
-package no.novari.communication.message
+package no.novari.communication.message.domain
 
+import no.novari.communication.model.Tenant
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import java.time.Clock
@@ -7,8 +8,14 @@ import java.time.Instant
 import java.time.ZoneOffset
 
 class OutgoingMessageTest {
-    private val tenant = Tenant("rogfk.no")
-    private val payload = EmailPayload(to = "ola.nordmann@rogfk.no", subject = "Emne", body = "Innhold")
+    private val tenant = Tenant.ROGALAND
+    private val payload =
+        EmailPayload(
+            templateId = "team/mal",
+            to = "ola.nordmann@rogfk.no",
+            subject = "Emne",
+            body = "Innhold",
+        )
     private val now = Instant.parse("2026-10-06T12:00:00Z")
     private val clock = Clock.fixed(now, ZoneOffset.UTC)
 
@@ -38,6 +45,6 @@ class OutgoingMessageTest {
     fun `toString does not expose personal data from the payload`() {
         assertThat(OutgoingMessage.receive(tenant, payload, clock).toString())
             .doesNotContain("ola.nordmann")
-            .contains("rogfk.no")
+            .contains("ROGALAND")
     }
 }
