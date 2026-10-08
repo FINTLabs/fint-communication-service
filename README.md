@@ -82,21 +82,58 @@ gjentar aldri verdiene som ble sendt inn.
 ## Grenser
 
 Tjenesten er et sikkerhetsnett over konsumentenes egne grenser: en mottaker skal ikke kunne få
-spam fra Novari, uansett hvilken tenant eller applikasjon som sender.
+spam fra Novari, uansett hvilken tenant eller applikasjon som sender. Grensene per tenant og totalt
+skal i tillegg stoppe en kompromittert eller feilkonfigurert avsender og holde kostnaden under
+kontroll.
 
-| Grense       | Verdi | Vindu             |
-|--------------|-------|-------------------|
-| Per mottaker | 10    | Siste 60 minutter |
-| Per mottaker | 40    | Siste 24 timer    |
+| Grense       | `limit`    | Verdi | Vindu             | Status          |
+|--------------|------------|-------|-------------------|-----------------|
+| Per mottaker | `mottaker` | 10    | Siste 60 minutter | Avgjort         |
+| Per mottaker | `mottaker` | 40    | Siste 24 timer    | Avgjort         |
+| Per tenant   | `tenant`   | 100   | Siste 60 minutter | Ikke bekreftet* |
+| Per tenant   | `tenant`   | 500   | Siste 24 timer    | Ikke bekreftet* |
+| Totalt       | `total`    | 500   | Siste 60 minutter | Ikke bekreftet* |
+| Totalt       | `total`    | 2000  | Siste 24 timer    | Ikke bekreftet* |
+
+\* Foreslåtte startverdier uten trafikktall. De må bekreftes med PO/Flais før produksjon.
 
 - Mottakeren er adressen etter `trim` og små bokstaver, felles for alle tenants. `ola+test@rogfk.no`
   er en annen mottaker enn `ola@rogfk.no`.
-- Bare meldinger som får `202`, teller. En avvist melding teller ikke.
+- Tenantgrensen gjelder hver tenant for seg; når én tenant når grensen, kan de andre fortsatt sende.
+  Totalgrensen gjelder alle tenants samlet.
+- Grensene sjekkes i rekkefølgen mottaker → tenant → total. Bare meldinger som får `202`, teller; en
+  avvist melding teller ikke mot noen av grensene.
 - Overskredet grense gir `429 Too Many Requests` med `Retry-After` (sekunder til neste melding kan
-  sendes) og `limit` som grensetype. Adressen gjentas ikke.
+  sendes) og `limit` som grensetype. Er flere grenser brutt, får svaret den som gir lengst ventetid.
+  Adressen gjentas ikke.
 - Er databasen utilgjengelig, avvises meldingen med `503` (fail-closed).
 - Høyere grenser for enkeltmottakere innføres først når fylket eller mottakeren uttrykkelig har gitt
   tillatelse.
+
+Grensene ligger i `app/src/main/resources/application.yaml` og endres med PR og deploy. En tenant kan
+få egne grenser med en override. Nøkkelen er enum-navnet i `Tenant`, og både `per-hour` og `per-day`
+må settes. Tenanter uten override bruker `default`.
+
+```yaml
+communication:
+  limits:
+    recipient:
+      per-hour: 10
+      per-day: 40
+    tenant:
+      default:
+        per-hour: 100
+        per-day: 500
+      overrides:
+        ROGALAND:
+          per-hour: 200
+          per-day: 1000
+    total:
+      per-hour: 500
+      per-day: 2000
+```
+
+Ingen tenant har override i dag. NOVARI (test) bruker også `default`.
 
 ```json
 HTTP/1.1 429
@@ -164,11 +201,18 @@ med Jackson 2 (`:client:test`) og Spring Framework 7 med Jackson 3 (`:client:tes
 
 ## Konfigurasjon
 
-| Variabel                                                                            | Innhold                                                                                                                                            |
-|-------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `fint.database.url`, `fint.database.username`, `fint.database.password`             | Settes av Flais fra `spec.database` (`fint-common`).                                                                                               |
-| `COMMUNICATION_RECIPIENT_HASHING_KEY`                                               | HMAC-nøkkel for mottaker-hashing, base64, minst 32 bytes. Fra 1Password. Oppstarten feiler uten den.                                               |
-| `communication.limits.recipient.per-hour`, `communication.limits.recipient.per-day` | Grenser per mottaker (10 og 40) i `application.yaml`. Må være større enn 0, og `per-day` minst like stor som `per-hour`; ellers feiler oppstarten. |
+| Variabel                                                                                      | Innhold                                                                                              |
+|-----------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
+| `fint.database.url`, `fint.database.username`, `fint.database.password`                       | Settes av Flais fra `spec.database` (`fint-common`).                                                 |
+| `COMMUNICATION_RECIPIENT_HASHING_KEY`                                                         | HMAC-nøkkel for mottaker-hashing, base64, minst 32 bytes. Fra 1Password. Oppstarten feiler uten den. |
+| `communication.limits.recipient.per-hour`, `communication.limits.recipient.per-day`           | Grenser per mottaker (10 og 40) i `application.yaml`.                                                |
+| `communication.limits.tenant.default.per-hour`, `communication.limits.tenant.default.per-day` | Grenser per tenant (100 og 500, ikke bekreftet) i `application.yaml`.                                |
+| `communication.limits.tenant.overrides.<TENANT>.per-hour`, `...per-day`                       | Valgfri override per tenant. Nøkkelen er enum-navnet i `Tenant`, og begge feltene må settes.         |
+| `communication.limits.total.per-hour`, `communication.limits.total.per-day`                   | Grenser for alle tenants samlet (500 og 2000, ikke bekreftet) i `application.yaml`.                  |
+
+Alle grenser må være større enn 0, og `per-day` minst like stor som `per-hour`. Tenantgrensene
+(`default` og hver override) kan ikke være høyere enn totalgrensen. Ukjent tenant i `overrides` eller
+en override med bare ett av feltene stopper også oppstarten.
 
 Ny nøkkel lages med `openssl rand -base64 32`. Bytter man nøkkel, kjenner tjenesten ikke lenger igjen
 mottakere som er lagret fra før; se [Database](docs/architecture.md#database).

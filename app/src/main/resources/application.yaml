@@ -27,6 +27,13 @@ communication:
     recipient:
       per-hour: 10
       per-day: 40
+    tenant:
+      default:
+        per-hour: 100
+        per-day: 500
+    total:
+      per-hour: 500
+      per-day: 2000
   retention:
     metadata: 60d
     cleanup-cron: "0 15 3 * * *"
