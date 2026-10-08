@@ -16,6 +16,10 @@ spec:
   imagePullPolicy: Always
   orgId: fintlabs.no
   image: ghcr.io/fintlabs/fint-communication-service:sha-0000000
+  database:
+    database: fint-common
+  onePassword:
+    itemPath: path
   env:
     - name: JAVA_TOOL_OPTIONS
       value: '-XX:+ExitOnOutOfMemoryError -XX:MaxRAMPercentage=60'

@@ -1,0 +1,1 @@
+-- Tom baseline. Tabellene kommer i egne migreringer (V2 og videre).
