@@ -52,6 +52,11 @@ spec:
       failureThreshold: 5
       periodSeconds: 10
       timeoutSeconds: 3
+  observability:
+    metrics:
+      enabled: true
+      port: "8080"
+      path: /actuator/prometheus
   restartPolicy: Always
   replicas: 1
   strategy:
