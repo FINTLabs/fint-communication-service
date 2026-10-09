@@ -30,6 +30,8 @@ import java.time.Instant
 import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import javax.sql.DataSource
 
 @IntegrationTest
 @ExtendWith(OutputCaptureExtension::class)
@@ -54,6 +56,9 @@ class RecipientLimitIntegrationTest {
 
     @Autowired
     lateinit var jdbcClient: JdbcClient
+
+    @Autowired
+    lateinit var dataSource: DataSource
 
     private lateinit var mockMvc: MockMvc
 
@@ -174,6 +179,39 @@ class RecipientLimitIntegrationTest {
     }
 
     @Test
+    fun `the time is read after waiting for the lock`() {
+        repeat(10) { sendPayload(ADDRESS, Tenant.ROGALAND) }
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val result =
+                holdingRecipientLock {
+                    clock.set(START.plus(Duration.ofHours(1)).minusSeconds(1))
+                    val pending = executor.submit(Callable { runCatching { sendPayload(ADDRESS, Tenant.ROGALAND) } })
+                    awaitLockWaiter()
+                    clock.set(START.plus(Duration.ofHours(1)))
+                    pending
+                }.get(10, TimeUnit.SECONDS)
+
+            assertThat(result.isSuccess).isTrue()
+            assertThat(sentTimes()).last().isEqualTo(START.plus(Duration.ofHours(1)))
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `the recipient lock not being granted in time gives service unavailable`() {
+        holdingRecipientLock {
+            send().andExpect {
+                status { isServiceUnavailable() }
+                jsonPath("$.detail") { value("Tjenesten er midlertidig utilgjengelig") }
+            }
+        }
+
+        assertThat(usageRows()).isZero()
+    }
+
+    @Test
     fun `neither the response nor the log contains the address or its hash`(output: CapturedOutput) {
         repeat(10) { send() }
 
@@ -230,6 +268,40 @@ class RecipientLimitIntegrationTest {
         tenant,
         EmailPayload(templateId = "team/varsel", to = to, subject = "Emne", body = "Innhold"),
     )
+
+    private fun <T> holdingRecipientLock(block: () -> T): T =
+        dataSource.connection.use { connection ->
+            connection.autoCommit = false
+            connection.prepareStatement("SELECT pg_advisory_xact_lock(?)").use { statement ->
+                statement.setLong(1, java.lang.Long.parseUnsignedLong(hasher.hash(ADDRESS).value.take(16), 16))
+                statement.execute()
+            }
+            try {
+                block()
+            } finally {
+                connection.rollback()
+            }
+        }
+
+    private fun awaitLockWaiter() {
+        val deadline = System.nanoTime() + Duration.ofSeconds(4).toNanos()
+        while (System.nanoTime() < deadline) {
+            val waiting =
+                jdbcClient
+                    .sql("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")
+                    .query(Long::class.java)
+                    .single()
+            if (waiting > 0) return
+            Thread.sleep(20)
+        }
+        throw AssertionError("Ingen forespørsel venter på låsen")
+    }
+
+    private fun sentTimes(): List<Instant> =
+        jdbcClient
+            .sql("SELECT sent_at FROM send_usage ORDER BY sent_at")
+            .query { rs, _ -> rs.getObject("sent_at", java.time.OffsetDateTime::class.java).toInstant() }
+            .list()
 
     private fun usageRows(): Long = jdbcClient.sql("SELECT count(*) FROM send_usage").query(Long::class.java).single()
 

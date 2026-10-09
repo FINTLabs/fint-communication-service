@@ -528,7 +528,8 @@ Retry-After: 3000
 ```
 
 503 gis for `CannotCreateTransactionException`, `DataAccessResourceFailureException` og
-`PessimisticLockingFailureException` (lock timeout), og for `TransactionSystemException` når
+`PessimisticLockingFailureException` (lock timeout; Spring oversetter ikke SQLSTATE `55P03`, så
+`SendUsageRepository` gjør det selv), og for `TransactionSystemException` når
 rollback feilet fordi forbindelsen er brutt. Andre databasefeil er bugs og blir 500.
 
 En feil som oppstår i rendering eller domene etter at valideringen har godkjent requesten, er en bug
@@ -718,17 +719,20 @@ stopper oppstarten.
 
 `send_usage` har én rad per akseptert melding:
 
-| Kolonne          | Innhold                                                |
-|------------------|--------------------------------------------------------|
-| `message_id`     | Meldings-ID (primærnøkkel).                            |
-| `recipient_hash` | `RecipientHash`. Global, så alle tenants deler teller. |
-| `tenant`         | Enum-navnet. Brukes av grensene per tenant (FFS-2334). |
-| `sent_at`        | Tidspunkt fra `Clock`.                                 |
+| Kolonne          | Innhold                                                              |
+|------------------|----------------------------------------------------------------------|
+| `message_id`     | Meldings-ID (primærnøkkel).                                          |
+| `recipient_hash` | `RecipientHash`. Global, så alle tenants deler teller.               |
+| `tenant`         | Enum-navnet. Brukes av grensene per tenant (FFS-2334).               |
+| `sent_at`        | Tidspunkt fra `Clock`, lest etter at låsen er tatt (se Samtidighet). |
 
 - **Samtidighet.** `DatabaseSendLimiter` tar `pg_advisory_xact_lock` på de første 64 bitene av
   hashen før den teller. Samtidige meldinger til samme mottaker, også fra flere pods, går dermed
   etter hverandre. Låsen slippes ved commit eller rollback, og venter høyst 5 sekunder
-  (`lock_timeout`, gir 503). FFS-2334 tar låser for tenant og totalt i fast rekkefølge etter
+  (`lock_timeout`, gir 503). Tidspunktet som brukes til vinduene og lagres i `sent_at`, leses
+  først når låsen er tatt, ikke `receivedAt`. Ellers kunne en forespørsel som ventet på låsen, bli
+  avvist for forbruk som allerede hadde gått ut av vinduet, eller bli registrert for tidlig, slik at
+  neste melding slapp gjennom før det var gått et helt vindu. FFS-2334 tar låser for tenant og totalt i fast rekkefølge etter
   mottakeren, så det ikke kan oppstå vranglås.
 - **Retry-After.** For hvert vindu som er brutt, er neste ledige tidspunkt når raden nummer
   `antall − grense` (eldste først) faller ut av vinduet. Svaret er det seneste av vinduene, i hele

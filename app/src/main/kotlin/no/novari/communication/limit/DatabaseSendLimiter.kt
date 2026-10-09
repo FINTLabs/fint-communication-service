@@ -5,12 +5,14 @@ import no.novari.communication.recipient.RecipientHash
 import org.springframework.stereotype.Component
 import org.springframework.transaction.annotation.Propagation
 import org.springframework.transaction.annotation.Transactional
+import java.time.Clock
 import java.time.Duration
 
 @Component
 class DatabaseSendLimiter(
     private val repository: SendUsageRepository,
     properties: LimitProperties,
+    private val clock: Clock,
 ) : SendLimiter {
     private val recipientLimits =
         listOf(
@@ -24,8 +26,10 @@ class DatabaseSendLimiter(
         message: OutgoingMessage,
         recipient: RecipientHash,
     ) {
-        repository.lockRecipient(recipient, LOCK_TIMEOUT)
-        val now = message.receivedAt
+        repository.setLockTimeout(LOCK_TIMEOUT)
+        repository.lockRecipient(recipient)
+        // Leses etter låsen: receivedAt kan være flere sekunder gammelt hvis forespørselen ventet på låsen.
+        val now = clock.instant()
         val sentTimes = repository.recipientSentTimesSince(recipient, now - DAY)
         val retryAfter = recipientLimits.mapNotNull { it.retryAfter(sentTimes, now) }.maxOrNull()
         if (retryAfter != null) {

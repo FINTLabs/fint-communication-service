@@ -3,6 +3,8 @@ package no.novari.communication.limit
 import no.novari.communication.message.domain.MessageId
 import no.novari.communication.model.Tenant
 import no.novari.communication.recipient.RecipientHash
+import org.springframework.dao.CannotAcquireLockException
+import org.springframework.jdbc.UncategorizedSQLException
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
 import java.time.Duration
@@ -14,18 +16,25 @@ import java.time.ZoneOffset
 class SendUsageRepository(
     private val jdbcClient: JdbcClient,
 ) {
-    fun lockRecipient(
-        recipient: RecipientHash,
-        timeout: Duration,
-    ) {
+    fun setLockTimeout(timeout: Duration) {
         jdbcClient
             .sql("SELECT set_config('lock_timeout', :timeout, true)")
             .param("timeout", "${timeout.toMillis()}ms")
             .query {}
-        jdbcClient
-            .sql("SELECT pg_advisory_xact_lock(:key)")
-            .param("key", lockKey(recipient))
-            .query {}
+    }
+
+    fun lockRecipient(recipient: RecipientHash) {
+        acquireLock(jdbcClient.sql("SELECT pg_advisory_xact_lock(:key)").param("key", lockKey(recipient)))
+    }
+
+    // Spring oversetter ikke lock_not_available, så uten dette ville lock timeout gitt 500 i stedet for 503.
+    private fun acquireLock(statement: JdbcClient.StatementSpec) {
+        try {
+            statement.query {}
+        } catch (exception: UncategorizedSQLException) {
+            if (exception.sqlException?.sqlState != LOCK_NOT_AVAILABLE_SQL_STATE) throw exception
+            throw CannotAcquireLockException("Fikk ikke låsen innen lock_timeout", exception)
+        }
     }
 
     fun recipientSentTimesSince(
@@ -72,4 +81,8 @@ class SendUsageRepository(
     private fun lockKey(recipient: RecipientHash): Long = java.lang.Long.parseUnsignedLong(recipient.value.take(16), 16)
 
     private fun Instant.toOffsetDateTime(): OffsetDateTime = OffsetDateTime.ofInstant(this, ZoneOffset.UTC)
+
+    private companion object {
+        const val LOCK_NOT_AVAILABLE_SQL_STATE = "55P03"
+    }
 }
