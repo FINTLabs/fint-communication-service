@@ -3,19 +3,24 @@ package no.novari.communication.message.dispatch
 import io.github.oshai.kotlinlogging.KotlinLogging
 import no.novari.communication.email.EmailAdapter
 import no.novari.communication.email.EmailSendOutcome
-import no.novari.communication.email.FailureReason
 import no.novari.communication.email.RetryReason
+import no.novari.communication.email.value
+import no.novari.communication.message.MessageStore
 import no.novari.communication.message.domain.MessageChannel
-import no.novari.communication.message.domain.MessageStatus
+import no.novari.communication.model.FailureReason
+import no.novari.communication.model.MessageStatus
 import org.springframework.dao.DataAccessException
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
+import org.springframework.transaction.support.TransactionOperations
 import java.time.Clock
 import java.time.Duration
 
 @Component
 class DispatchWorker(
     private val repository: DispatchQueueRepository,
+    private val messageStore: MessageStore,
+    private val transactions: TransactionOperations,
     private val codec: PayloadCodec,
     private val emailAdapter: EmailAdapter,
     private val metrics: DispatchMetrics,
@@ -65,7 +70,7 @@ class DispatchWorker(
         }
 
     private fun sent(message: QueuedMessage) {
-        if (!repository.delete(message)) return logLeaseLost(message)
+        if (!complete(message, MessageStatus.SENT, null)) return logLeaseLost(message)
         metrics.sent(message)
         log.info { "Melding sendt ${describe(message, MessageStatus.SENT)}" }
     }
@@ -94,24 +99,30 @@ class DispatchWorker(
         reason: FailureReason,
         detail: String,
     ) {
-        if (!repository.delete(message)) return logLeaseLost(message)
+        if (!complete(message, MessageStatus.FAILED, reason)) return logLeaseLost(message)
         metrics.failed(message, reason)
         log.warn { "Melding feilet ${describe(message, MessageStatus.FAILED)} årsak=${reason.value} detalj=$detail" }
     }
 
+    private fun complete(
+        message: QueuedMessage,
+        status: MessageStatus,
+        failureReason: FailureReason?,
+    ): Boolean =
+        transactions.execute {
+            val deleted = repository.delete(message)
+            if (deleted) messageStore.complete(message.id, status, failureReason, clock.instant())
+            deleted
+        } == true
+
     private fun logLeaseLost(message: QueuedMessage) {
-        log.warn {
-            "Meldingen er tatt over av et nytt forsøk etter at leasen gikk ut ${describe(
-                message,
-                MessageStatus.PROCESSING,
-            )}"
-        }
+        log.warn { "Meldingen er tatt over av et nytt forsøk etter at leasen gikk ut ${describe(message)}" }
     }
 
     private fun describe(
         message: QueuedMessage,
-        status: MessageStatus,
+        status: MessageStatus? = null,
     ): String =
-        "id=${message.id.value} status=$status tenant=${message.tenant} channel=${message.channel} " +
-            "templateId=${message.templateId} forsøk=${message.attempts}"
+        "id=${message.id.value} ${status?.let { "status=$it " }.orEmpty()}tenant=${message.tenant} " +
+            "channel=${message.channel} templateId=${message.templateId} forsøk=${message.attempts}"
 }

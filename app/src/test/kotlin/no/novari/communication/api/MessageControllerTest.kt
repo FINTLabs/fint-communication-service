@@ -8,15 +8,22 @@ import no.novari.communication.limit.LimitExceededException
 import no.novari.communication.limit.LimitType
 import no.novari.communication.limit.SendLimiter
 import no.novari.communication.message.MessageService
+import no.novari.communication.message.MessageStore
+import no.novari.communication.message.StoredMessage
 import no.novari.communication.message.dispatch.MessageDispatcher
 import no.novari.communication.message.domain.EmailPayload
+import no.novari.communication.message.domain.MessageChannel
+import no.novari.communication.message.domain.MessageId
 import no.novari.communication.message.domain.OutgoingMessage
+import no.novari.communication.model.FailureReason
+import no.novari.communication.model.MessageStatus
 import no.novari.communication.model.Tenant
 import no.novari.communication.recipient.RecipientHash
 import no.novari.communication.recipient.RecipientHasher
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.skyscreamer.jsonassert.JSONAssert
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest
@@ -33,6 +40,7 @@ import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
 import java.util.Base64
+import java.util.UUID
 
 @WebMvcTest(MessageController::class)
 @Import(SendMessageRequestValidator::class, MessageService::class, MessageControllerTest.TestBeans::class)
@@ -49,8 +57,13 @@ class MessageControllerTest {
     @Autowired
     lateinit var blocklist: ControllableBlocklist
 
+    @Autowired
+    lateinit var messageStore: InMemoryMessageStore
+
     @BeforeEach
     fun reset() {
+        messageStore.messages.clear()
+        messageStore.failure = null
         dispatcher.dispatched.clear()
         dispatcher.failure = null
         sendLimiter.failure = null
@@ -70,6 +83,7 @@ class MessageControllerTest {
 
         val message = dispatcher.dispatched.single()
         assertThat(response).isEqualTo("""{"id":"${message.id.value}"}""")
+        assertThat(messageStore.messages.keys).containsExactly(message.id)
         assertThat(message.tenant).isEqualTo(Tenant.ROGALAND)
         assertThat(message.receivedAt).isEqualTo(NOW)
         assertThat(message.payload).isEqualTo(
@@ -266,6 +280,92 @@ class MessageControllerTest {
         assertThat(dispatcher.dispatched).isEmpty()
     }
 
+    @Test
+    fun `the status of a message has only id, status, failure reason and timestamps`() {
+        val id = MessageId(UUID.randomUUID())
+        messageStore.messages[id] = storedMessage(id, MessageStatus.SENT, null)
+
+        val response =
+            mockMvc
+                .get("${MessageController.MESSAGES_PATH}/${id.value}")
+                .andExpect {
+                    status { isOk() }
+                    content { contentTypeCompatibleWith(MediaType.APPLICATION_JSON) }
+                }.andReturn()
+                .response.contentAsString
+
+        JSONAssert.assertEquals(
+            """
+            {
+              "id": "${id.value}",
+              "status": "SENT",
+              "failureReason": null,
+              "receivedAt": "2026-10-06T12:00:00Z",
+              "updatedAt": "2026-10-06T12:00:03Z"
+            }
+            """,
+            response,
+            true,
+        )
+    }
+
+    @Test
+    fun `the status of a failed message has the failure reason`() {
+        val id = MessageId(UUID.randomUUID())
+        messageStore.messages[id] = storedMessage(id, MessageStatus.FAILED, FailureReason.REJECTED)
+
+        mockMvc.get("${MessageController.MESSAGES_PATH}/${id.value}").andExpect {
+            status { isOk() }
+            jsonPath("$.status") { value("FAILED") }
+            jsonPath("$.failureReason") { value("REJECTED") }
+        }
+    }
+
+    @Test
+    fun `an unknown message id is not found`() {
+        mockMvc.get("${MessageController.MESSAGES_PATH}/${UUID.randomUUID()}").andExpect {
+            status { isNotFound() }
+            content { contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON) }
+            jsonPath("$.status") { value(404) }
+            jsonPath("$.detail") { value("Meldingen finnes ikke") }
+        }
+    }
+
+    @Test
+    fun `a message id that is not a uuid is a bad request`() {
+        mockMvc.get("${MessageController.MESSAGES_PATH}/ikke-en-uuid").andExpect {
+            status { isBadRequest() }
+            content { contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON) }
+            jsonPath("$.errors[0].field") { value("id") }
+            jsonPath("$.errors[0].message") { value("har feil format") }
+        }
+    }
+
+    @Test
+    fun `the status is unavailable when the database is`() {
+        messageStore.failure = CannotGetJdbcConnectionException("Failed to obtain JDBC Connection")
+
+        mockMvc.get("${MessageController.MESSAGES_PATH}/${UUID.randomUUID()}").andExpect {
+            status { isServiceUnavailable() }
+            jsonPath("$.detail") { value("Tjenesten er midlertidig utilgjengelig") }
+        }
+    }
+
+    private fun storedMessage(
+        id: MessageId,
+        status: MessageStatus,
+        failureReason: FailureReason?,
+    ) = StoredMessage(
+        id = id,
+        tenant = Tenant.ROGALAND,
+        channel = MessageChannel.EMAIL,
+        templateId = TestTemplates.ID,
+        status = status,
+        failureReason = failureReason,
+        receivedAt = NOW,
+        updatedAt = NOW + Duration.ofSeconds(3),
+    )
+
     private fun postJson(json: String) =
         mockMvc.post(MessageController.MESSAGES_PATH) {
             contentType = MediaType.APPLICATION_JSON
@@ -304,8 +404,42 @@ class MessageControllerTest {
         }
     }
 
+    class InMemoryMessageStore : MessageStore {
+        val messages = mutableMapOf<MessageId, StoredMessage>()
+        var failure: RuntimeException? = null
+
+        override fun save(message: OutgoingMessage) {
+            messages[message.id] =
+                StoredMessage(
+                    message.id,
+                    message.tenant,
+                    message.channel,
+                    message.payload.templateId,
+                    message.status,
+                    null,
+                    message.receivedAt,
+                    message.receivedAt,
+                )
+        }
+
+        override fun find(id: MessageId): StoredMessage? {
+            failure?.let { throw it }
+            return messages[id]
+        }
+
+        override fun complete(
+            id: MessageId,
+            status: MessageStatus,
+            failureReason: FailureReason?,
+            at: Instant,
+        ) = throw UnsupportedOperationException()
+    }
+
     @TestConfiguration
     class TestBeans {
+        @Bean
+        fun inMemoryMessageStore() = InMemoryMessageStore()
+
         @Bean
         fun emailTemplateCatalog() = TestTemplates.catalog()
 
