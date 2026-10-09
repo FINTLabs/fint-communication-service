@@ -3,6 +3,7 @@ package no.novari.communication.email
 import com.azure.core.http.HttpMethod
 import no.novari.communication.message.domain.EmailPayload
 import no.novari.communication.message.domain.MessageId
+import no.novari.communication.model.FailureReason
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import tools.jackson.databind.json.JsonMapper

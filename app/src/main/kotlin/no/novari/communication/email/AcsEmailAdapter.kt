@@ -14,6 +14,7 @@ import com.azure.core.util.polling.LongRunningOperationStatus
 import com.azure.core.util.polling.PollResponse
 import no.novari.communication.message.domain.EmailPayload
 import no.novari.communication.message.domain.MessageId
+import no.novari.communication.model.FailureReason
 import java.io.IOException
 import java.time.Duration
 import java.util.concurrent.TimeoutException

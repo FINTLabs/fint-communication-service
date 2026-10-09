@@ -16,7 +16,8 @@ Se [docs/architecture.md](docs/architecture.md) for arkitektur, dataflyt og sekv
 
 `POST /api/v1/messages` tar imot e-post basert på maler og svarer `202 Accepted` med en
 meldings-ID. Meldingen legges i en kø i databasen og sendes asynkront via leverandøren som er
-konfigurert (se [Utsending](#utsending)). Hver mottaker kan få høyst 10 meldinger per time og 40
+konfigurert (se [Utsending](#utsending)). Status for meldingen slås opp med
+`GET /api/v1/messages/{id}` (se [Status for en melding](#status-for-en-melding)). Hver mottaker kan få høyst 10 meldinger per time og 40
 per døgn (se [Grenser](#grenser)), og mottakere som har meldt seg av eller hard-bouncet, avvises
 (se [Blokkeringsliste](#blokkeringsliste)). Azure Communication Services (ACS) er klar i koden,
 men ressursen finnes ikke ennå (FFS-1965), så alle miljøer bruker foreløpig leverandøren `logging`,
@@ -38,6 +39,7 @@ som logger og forkaster meldingen. Layout og autentisering kommer i egne oppgave
 | Endepunkt                    | Bruk                                        |
 |------------------------------|---------------------------------------------|
 | `POST /api/v1/messages`      | Send melding                                |
+| `GET /api/v1/messages/{id}`  | Status for en melding                       |
 | `/actuator/health`           | Startup-probe                               |
 | `/actuator/health/liveness`  | Liveness-probe                              |
 | `/actuator/health/readiness` | Readiness-probe                             |
@@ -85,6 +87,40 @@ gjentar aldri verdiene som ble sendt inn.
   "errors": [{ "field": "message.variables.antallFeil", "message": "kan ikke være lengre enn 6 tegn" }]
 }
 ```
+
+### Status for en melding
+
+`GET /api/v1/messages/{id}` med ID-en fra `202`-svaret gir status for meldingen:
+
+```json
+{
+  "id": "0d6f7e0a-3c1b-4f53-9a35-0a4f8f7f2b11",
+  "status": "FAILED",
+  "failureReason": "REJECTED",
+  "receivedAt": "2026-10-09T08:00:00.123456Z",
+  "updatedAt": "2026-10-09T08:00:04.512Z"
+}
+```
+
+| `status`   | Betyr                                                                                                                          |
+|------------|--------------------------------------------------------------------------------------------------------------------------------|
+| `RECEIVED` | Akseptert og lagt i køen, men ikke sendt ennå. Gjelder også mens tjenesten venter på et nytt forsøk etter en forbigående feil. |
+| `SENT`     | ACS har tatt imot meldingen for levering. Det betyr ikke at den er levert til mottakeren.                                      |
+| `FAILED`   | Meldingen ble ikke sendt, og tjenesten prøver ikke igjen. `failureReason` sier hvorfor.                                        |
+
+| `failureReason`     | Betyr                                                                                              | Nytt forsøk                |
+|---------------------|----------------------------------------------------------------------------------------------------|----------------------------|
+| `REJECTED`          | ACS avviste forespørselen (4xx).                                                                   | Hjelper ikke uten endring. |
+| `OPERATION_FAILED`  | ACS tok imot forespørselen, men operasjonen feilet, f.eks. fordi mottakeren er undertrykt hos ACS. | Hjelper ikke uten endring. |
+| `RETRIES_EXHAUSTED` | Forbigående feil i alle 8 forsøkene (ca. 2 timer).                                                 | Kan sendes på nytt senere. |
+
+`failureReason` er `null` når status ikke er `FAILED`. `updatedAt` er når status sist ble endret.
+Svaret har aldri mottaker, mal, emne eller innhold, og det er ingen tenant-sjekk. Ukjent ID, eller en
+melding som er slettet etter 60 dager, gir `404`. En ID som ikke er en UUID, gir `400`.
+
+Leveringsrapportene fra ACS (levert, bounce, undertrykt, spam) kommer asynkront, sekunder til
+minutter etter `SENT`. De blir egne statuser med FFS-2338; til da er `SENT` den siste statusen for en
+melding som gikk gjennom.
 
 ## Grenser
 
@@ -291,15 +327,16 @@ som er klare, hvert andre sekund, og sender dem via `EmailAdapter`. Flere pods d
 sende samme melding to ganger, og en melding som var under sending da en pod stoppet, sendes på
 nytt etter 5 minutter.
 
-| Utfall                                                                             | Hva skjer                                                                                                                |
-|------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
-| Sendt (ACS har bekreftet operasjonen)                                              | Raden slettes. `communication_message_sent_total` øker.                                                                  |
-| Forbigående feil (nettverk, 408, 429, 5xx, 401/403, ingen sluttstatus innen 2 min) | Nytt forsøk etter 1, 2, 4 … minutter (høyst 1 time mellom forsøkene; `Retry-After` fra ACS respekteres), høyst 8 forsøk. |
-| Permanent feil (andre 4xx, operasjonen feilet hos ACS)                             | Raden slettes. `communication_message_failed_total` øker, og en WARN-logg har årsak og ACS-feilkode.                     |
-| Forsøkene brukt opp                                                                | Som permanent feil, med årsak `retries-exhausted`.                                                                       |
+| Utfall                                                                             | Hva skjer                                                                                                                                                                    |
+|------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Sendt (ACS har bekreftet operasjonen)                                              | Raden i køen slettes, og status blir `SENT`. `communication_message_sent_total` øker.                                                                                        |
+| Forbigående feil (nettverk, 408, 429, 5xx, 401/403, ingen sluttstatus innen 2 min) | Nytt forsøk etter 1, 2, 4 … minutter (høyst 1 time mellom forsøkene; `Retry-After` fra ACS respekteres), høyst 8 forsøk.                                                     |
+| Permanent feil (andre 4xx, operasjonen feilet hos ACS)                             | Raden i køen slettes, og status blir `FAILED` med `REJECTED` eller `OPERATION_FAILED`. `communication_message_failed_total` øker, og en WARN-logg har årsak og ACS-feilkode. |
+| Forsøkene brukt opp                                                                | Som permanent feil, med årsak `RETRIES_EXHAUSTED` (`retries-exhausted` i metrikker og logg).                                                                                 |
 
-Konsumenten får ikke vite utfallet ennå; meldingsstatus per ID kommer i FFS-2337. Leverandøren
-velges med `communication.email.provider`:
+Status og tidspunkter ligger i tabellen `message` i 60 dager etter mottak, uten adresse og innhold,
+og kan slås opp med `GET /api/v1/messages/{id}` (se [Status for en melding](#status-for-en-melding)).
+Leverandøren velges med `communication.email.provider`:
 
 | Verdi     | Adapter               | Bruk                                                                                                         |
 |-----------|-----------------------|--------------------------------------------------------------------------------------------------------------|
@@ -350,6 +387,7 @@ Loggen er JSON, også lokalt og i testene. Lesbar tekst får man med et tomt for
 | `communication.dispatch.poll-interval`, `communication.dispatch.batch-size`                                           | Hvor ofte køen sjekkes (`2s`) og hvor mange meldinger som hentes om gangen (`10`).                                                  |
 | `communication.dispatch.lease`                                                                                        | Hvor lenge en melding er reservert av en pod før en annen kan ta den (`5m`).                                                        |
 | `communication.dispatch.max-attempts`, `communication.dispatch.initial-backoff`, `communication.dispatch.max-backoff` | Antall forsøk og ventetid mellom dem (`8`, `1m`, `1h`).                                                                             |
+| `communication.retention.metadata`, `communication.retention.cleanup-cron`                                            | Hvor lenge status per melding beholdes (`60d`), og når opprydningen kjører (kl. 03.15 hver natt).                                   |
 | `communication.dispatch.queue-metrics-refresh`                                                                        | Hvor ofte kø-metrikkene regnes ut fra databasen (`60s`).                                                                            |
 | `communication.limits.recipient.per-hour`, `communication.limits.recipient.per-day`                                   | Grenser per mottaker (10 og 40) i `application.yaml`.                                                                               |
 | `communication.limits.tenant.default.per-hour`, `communication.limits.tenant.default.per-day`                         | Grenser per tenant (100 og 500, ikke bekreftet) i `application.yaml`.                                                               |
@@ -416,8 +454,21 @@ val response =
     )
 ```
 
-For reactive applikasjoner: `CommunicationClients.createReactive(webClient)`, som returnerer
-`Mono<MessageAcceptedResponse>`.
+Status for meldingen hentes med ID-en fra svaret:
+
+```kotlin
+val status = client.getStatus(response.id)
+if (status.status == MessageStatus.FAILED && status.failureReason == FailureReason.RETRIES_EXHAUSTED) {
+    // f.eks. send på nytt senere
+}
+```
+
+For reactive applikasjoner: `CommunicationClients.createReactive(webClient)`, der `send` returnerer
+`Mono<MessageAcceptedResponse>` og `getStatus` returnerer `Mono<MessageStatusResponse>`.
+
+`receivedAt` og `updatedAt` er `Instant`. Med Jackson 2 (Spring Boot 3) må
+`jackson-datatype-jsr310` være på classpath; Spring Boot har den med i `spring-boot-starter-json`.
+Jackson 3 (Spring Boot 4) støtter `java.time` uten ekstra modul.
 
 ### Feil fra tjenesten
 
@@ -439,7 +490,9 @@ try {
 ```
 
 For `WebClient` er tilsvarende unntak `WebClientResponseException.TooManyRequests`. `503` betyr at
-tjenesten er midlertidig utilgjengelig og kan prøves på nytt senere.
+tjenesten er midlertidig utilgjengelig og kan prøves på nytt senere. `getStatus` kaster
+`HttpClientErrorException.NotFound` (`WebClientResponseException.NotFound`) for en ukjent ID eller en
+melding som er slettet etter 60 dager.
 
 ## Release av bibliotekene
 

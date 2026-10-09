@@ -1,8 +1,7 @@
-package no.novari.communication.message.domain
+package no.novari.communication.model
 
 enum class MessageStatus {
     RECEIVED,
-    PROCESSING,
     SENT,
     FAILED,
 }

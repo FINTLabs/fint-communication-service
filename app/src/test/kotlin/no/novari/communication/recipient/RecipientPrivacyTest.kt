@@ -10,6 +10,7 @@ import no.novari.communication.message.MessageService
 import no.novari.communication.message.dispatch.DispatchQueueMetrics
 import no.novari.communication.message.dispatch.DispatchWorker
 import no.novari.communication.message.domain.EmailPayload
+import no.novari.communication.message.domain.MessageId
 import no.novari.communication.model.Tenant
 import no.novari.communication.retention.RetentionCleanupJob
 import org.assertj.core.api.Assertions.assertThat
@@ -55,12 +56,15 @@ class RecipientPrivacyTest {
     @Autowired
     lateinit var queueMetrics: DispatchQueueMetrics
 
+    private lateinit var accepted: List<MessageId>
+
     @BeforeEach
     fun sendUntilLimitedAndBlocked() {
         jdbcClient.sql("DELETE FROM send_usage").update()
         jdbcClient.sql("DELETE FROM recipient_blocklist").update()
         jdbcClient.sql("DELETE FROM dispatch_queue").update()
-        repeat(RECIPIENT_PER_HOUR) { send(ADDRESS) }
+        jdbcClient.sql("DELETE FROM message").update()
+        accepted = List(RECIPIENT_PER_HOUR) { send(ADDRESS) }
         assertThatThrownBy { send(ADDRESS) }.isInstanceOf(LimitExceededException::class.java)
 
         jdbcClient
@@ -93,9 +97,13 @@ class RecipientPrivacyTest {
             "send_usage" to "recipient_hash",
             "send_usage" to "tenant",
             "recipient_blocklist" to "recipient_hash",
-            "dispatch_queue" to "tenant",
-            "dispatch_queue" to "template_id",
+            "message" to "tenant",
+            "message" to "channel",
+            "message" to "template_id",
+            "message" to "status",
         )
+        assertThat(jdbcClient.sql("SELECT count(*) FROM message").query(Long::class.java).single())
+            .isEqualTo(RECIPIENT_PER_HOUR.toLong())
 
         val columnsContainingAddress =
             textColumns().filter { (table, column) ->
@@ -169,6 +177,29 @@ class RecipientPrivacyTest {
             assertThat(scrape)
                 .doesNotContainIgnoringCase(address.trim())
                 .doesNotContain(hasher.hash(address).value)
+        }
+    }
+
+    @Test
+    fun `the status of a message has neither address nor hash`() {
+        dispatchWorker.processDue()
+        val mockMvc = MockMvcBuilders.webAppContextSetup(webApplicationContext).build()
+
+        accepted.forEach { id ->
+            val response =
+                mockMvc
+                    .get("/api/v1/messages/${id.value}")
+                    .andExpect {
+                        status { isOk() }
+                        jsonPath("$.status") { value("SENT") }
+                    }.andReturn()
+                    .response.contentAsString
+
+            ADDRESSES.forEach { address ->
+                assertThat(response)
+                    .doesNotContainIgnoringCase(address.trim())
+                    .doesNotContain(hasher.hash(address).value)
+            }
         }
     }
 

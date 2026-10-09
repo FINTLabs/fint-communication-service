@@ -4,6 +4,7 @@ import io.micrometer.core.instrument.MeterRegistry
 import no.novari.communication.IntegrationTest
 import no.novari.communication.MutableClock
 import no.novari.communication.message.MessageService
+import no.novari.communication.message.MessageStore
 import no.novari.communication.message.dispatch.DispatchMetrics
 import no.novari.communication.message.dispatch.DispatchProperties
 import no.novari.communication.message.dispatch.DispatchQueueRepository
@@ -18,6 +19,7 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.system.CapturedOutput
 import org.springframework.boot.test.system.OutputCaptureExtension
 import org.springframework.jdbc.core.simple.JdbcClient
+import org.springframework.transaction.support.TransactionOperations
 import java.io.IOException
 import java.time.Duration
 
@@ -29,6 +31,12 @@ class AcsLoggingPrivacyTest {
 
     @Autowired
     lateinit var repository: DispatchQueueRepository
+
+    @Autowired
+    lateinit var messageStore: MessageStore
+
+    @Autowired
+    lateinit var transactions: TransactionOperations
 
     @Autowired
     lateinit var codec: PayloadCodec
@@ -65,6 +73,8 @@ class AcsLoggingPrivacyTest {
         val worker =
             DispatchWorker(
                 repository,
+                messageStore,
+                transactions,
                 codec,
                 AcsEmailAdapter(acs.client(sdkRetries = 1), "no-reply@novari.no", Duration.ofSeconds(10)),
                 metrics,

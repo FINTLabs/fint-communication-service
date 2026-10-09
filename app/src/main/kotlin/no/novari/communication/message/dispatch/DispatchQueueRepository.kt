@@ -2,7 +2,6 @@ package no.novari.communication.message.dispatch
 
 import no.novari.communication.message.domain.MessageChannel
 import no.novari.communication.message.domain.MessageId
-import no.novari.communication.message.domain.MessageStatus
 import no.novari.communication.message.domain.OutgoingMessage
 import no.novari.communication.model.Tenant
 import org.springframework.jdbc.core.simple.JdbcClient
@@ -24,16 +23,11 @@ class DispatchQueueRepository(
         jdbcClient
             .sql(
                 """
-                INSERT INTO dispatch_queue
-                    (message_id, tenant, channel, template_id, status, next_attempt_at, received_at, payload)
-                VALUES (:messageId, :tenant, :channel, :templateId, :status, :receivedAt, :receivedAt, :payload)
+                INSERT INTO dispatch_queue (message_id, next_attempt_at, payload)
+                VALUES (:messageId, :nextAttemptAt, :payload)
                 """.trimIndent(),
             ).param("messageId", message.id.value)
-            .param("tenant", message.tenant.name)
-            .param("channel", message.channel.name)
-            .param("templateId", message.payload.templateId)
-            .param("status", message.status.name)
-            .param("receivedAt", message.receivedAt.toOffsetDateTime())
+            .param("nextAttemptAt", message.receivedAt.toOffsetDateTime())
             .param("payload", payload)
             .update()
     }
@@ -47,16 +41,19 @@ class DispatchQueueRepository(
             .sql(
                 """
                 UPDATE dispatch_queue
-                SET status = 'PROCESSING', attempts = attempts + 1, locked_until = :lockedUntil
-                WHERE message_id IN (
+                SET attempts = dispatch_queue.attempts + 1, locked_until = :lockedUntil
+                FROM message
+                WHERE message.message_id = dispatch_queue.message_id
+                  AND dispatch_queue.message_id IN (
                     SELECT message_id
                     FROM dispatch_queue
-                    WHERE next_attempt_at <= :now AND (status = 'RECEIVED' OR locked_until <= :now)
+                    WHERE next_attempt_at <= :now AND (locked_until IS NULL OR locked_until <= :now)
                     ORDER BY next_attempt_at
                     LIMIT :limit
                     FOR UPDATE SKIP LOCKED
                 )
-                RETURNING message_id, tenant, channel, template_id, attempts, received_at, payload
+                RETURNING dispatch_queue.message_id, message.tenant, message.channel, message.template_id,
+                    dispatch_queue.attempts, dispatch_queue.payload
                 """.trimIndent(),
             ).param("now", now.toOffsetDateTime())
             .param("lockedUntil", lockedUntil.toOffsetDateTime())
@@ -73,11 +70,10 @@ class DispatchQueueRepository(
             .sql(
                 """
                 UPDATE dispatch_queue
-                SET status = :status, next_attempt_at = :nextAttemptAt, locked_until = NULL
+                SET next_attempt_at = :nextAttemptAt, locked_until = NULL
                 WHERE message_id = :messageId AND attempts = :attempts
                 """.trimIndent(),
-            ).param("status", MessageStatus.RECEIVED.name)
-            .param("nextAttemptAt", nextAttemptAt.toOffsetDateTime())
+            ).param("nextAttemptAt", nextAttemptAt.toOffsetDateTime())
             .param("messageId", message.id.value)
             .param("attempts", message.attempts)
             .update() == 1
@@ -91,8 +87,12 @@ class DispatchQueueRepository(
 
     fun stats(): QueueStats =
         jdbcClient
-            .sql("SELECT count(*) AS size, min(received_at) AS oldest FROM dispatch_queue")
-            .query { rs, _ ->
+            .sql(
+                """
+                SELECT count(*) AS size, min(message.received_at) AS oldest
+                FROM dispatch_queue JOIN message USING (message_id)
+                """.trimIndent(),
+            ).query { rs, _ ->
                 QueueStats(rs.getInt("size"), rs.getObject("oldest", OffsetDateTime::class.java)?.toInstant())
             }.single()
 
@@ -103,7 +103,6 @@ class DispatchQueueRepository(
             channel = MessageChannel.valueOf(getString("channel")),
             templateId = getString("template_id"),
             attempts = getInt("attempts"),
-            receivedAt = getObject("received_at", OffsetDateTime::class.java).toInstant(),
             payload = getBytes("payload"),
         )
 
