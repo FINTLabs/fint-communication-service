@@ -2,6 +2,8 @@ package no.novari.communication.api
 
 import no.novari.communication.TEST_RECIPIENT_HASHING_KEY
 import no.novari.communication.api.validation.SendMessageRequestValidator
+import no.novari.communication.blocklist.RecipientBlockedException
+import no.novari.communication.blocklist.RecipientBlocklist
 import no.novari.communication.limit.LimitExceededException
 import no.novari.communication.limit.LimitType
 import no.novari.communication.limit.SendLimiter
@@ -44,11 +46,15 @@ class MessageControllerTest {
     @Autowired
     lateinit var sendLimiter: ControllableSendLimiter
 
+    @Autowired
+    lateinit var blocklist: ControllableBlocklist
+
     @BeforeEach
     fun reset() {
         dispatcher.dispatched.clear()
         dispatcher.failure = null
         sendLimiter.failure = null
+        blocklist.blocked = false
     }
 
     @Test
@@ -221,6 +227,22 @@ class MessageControllerTest {
     }
 
     @Test
+    fun `a blocked recipient is rejected without reason or address`() {
+        blocklist.blocked = true
+
+        postJson(VALID_REQUEST).andExpect {
+            status { isUnprocessableContent() }
+            content { contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON) }
+            jsonPath("$.title") { value("Unprocessable Content") }
+            jsonPath("$.status") { value(422) }
+            jsonPath("$.detail") { value("Mottakeren kan ikke motta e-post fra tjenesten.") }
+            jsonPath("$.instance") { value(MessageController.MESSAGES_PATH) }
+            content { string(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("ola@rogfk.no"))) }
+        }
+        assertThat(dispatcher.dispatched).isEmpty()
+    }
+
+    @Test
     fun `retry-after is at least one second`() {
         sendLimiter.failure = { message ->
             LimitExceededException(LimitType.RECIPIENT, message.tenant, message.id, Duration.ofMillis(1))
@@ -271,6 +293,17 @@ class MessageControllerTest {
         }
     }
 
+    class ControllableBlocklist : RecipientBlocklist {
+        var blocked = false
+
+        override fun checkNotBlocked(
+            message: OutgoingMessage,
+            recipient: RecipientHash,
+        ) {
+            if (blocked) throw RecipientBlockedException(message.tenant, message.id)
+        }
+    }
+
     @TestConfiguration
     class TestBeans {
         @Bean
@@ -281,6 +314,9 @@ class MessageControllerTest {
 
         @Bean
         fun controllableSendLimiter() = ControllableSendLimiter()
+
+        @Bean
+        fun controllableBlocklist() = ControllableBlocklist()
 
         @Bean
         fun recipientHasher() = RecipientHasher(Base64.getDecoder().decode(TEST_RECIPIENT_HASHING_KEY))

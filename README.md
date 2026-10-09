@@ -16,7 +16,8 @@ Se [docs/architecture.md](docs/architecture.md) for arkitektur, dataflyt og sekv
 
 `POST /api/v1/messages` tar imot e-post basert på maler og svarer `202 Accepted` med en
 meldings-ID. Meldingen sendes ikke ennå. Hver mottaker kan få høyst 10 meldinger per time og 40
-per døgn (se [Grenser](#grenser)). Layout, leverandøradapter og autentisering kommer i
+per døgn (se [Grenser](#grenser)), og mottakere som har meldt seg av eller hard-bouncet, avvises
+(se [Blokkeringsliste](#blokkeringsliste)). Layout, leverandøradapter og autentisering kommer i
 egne oppgaver under [FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
 
 ## Moduler
@@ -148,6 +149,94 @@ Retry-After: 3000
 }
 ```
 
+## Blokkeringsliste
+
+Mottakere som har meldt seg av (`OPT_OUT`) eller hard-bouncet (`HARD_BOUNCE`), får ikke e-post fra
+tjenesten. Listen er felles for alle tenants og sjekkes ved innsending, før grensene.
+
+| Årsak         | Varighet                   | Legges inn av                                                                                            |
+|---------------|----------------------------|----------------------------------------------------------------------------------------------------------|
+| `OPT_OUT`     | Til den fjernes manuelt.   | [Driftsrutinen](#driftsrutine-for-blokkeringslisten).                                                    |
+| `HARD_BOUNCE` | 30 dager fra siste bounce. | Driftsrutinen. Senere automatisk fra ACS ([FFS-2338](https://novari-iks.atlassian.net/browse/FFS-2338)). |
+
+- Mottakeren kjennes igjen på samme måte som for grensene: adressen etter `trim` og små bokstaver.
+- En blokkert mottaker gir `422 Unprocessable Content`. Svaret sier ikke om årsaken er opt-out eller
+  bounce, og gjentar ikke adressen. Meldingen lagres ikke og teller ikke mot grensene.
+- Listen lagrer bare HMAC-hashen av adressen, aldri adressen.
+- En utløpt blokkering gjelder ikke lenger og slettes av den nattlige opprydningen.
+- Er databasen utilgjengelig, avvises meldingen med `503` (fail-closed).
+
+```json
+HTTP/1.1 422
+
+{
+  "title": "Unprocessable Content",
+  "status": 422,
+  "detail": "Mottakeren kan ikke motta e-post fra tjenesten.",
+  "instance": "/api/v1/messages"
+}
+```
+
+### Driftsrutine for blokkeringslisten
+
+Det finnes ingen avmeldingslenke eller admin-API ennå
+([FFS-2340](https://novari-iks.atlassian.net/browse/FFS-2340)). Opt-out legges inn og blokkeringer
+fjernes med SQL mot databasen `fint-common`, etter at hashen av adressen er beregnet.
+
+**1. Beregn hashen i podden.** Nøkkelen ligger allerede i podden, så den forlater aldri clusteret, og
+du trenger ikke tilgang til 1Password-itemet. Imaget har ikke shell, men `kubectl exec` starter `java`
+direkte. Legg adressene i en fil, én per linje, og send filen inn på stdin, så adressene ikke havner i
+shell-historikken eller prosesslisten:
+
+```bash
+kubectl exec -i -n fintlabs-no deploy/fint-communication-service -- java -Xmx64m -cp /app/app.jar -Dloader.main=no.novari.communication.recipient.RecipientHashCliKt org.springframework.boot.loader.launch.PropertiesLauncher < adresser.txt
+```
+
+Utdata er én hash (64 hex-tegn) per adresse, i samme rekkefølge. Blanke linjer hoppes over.
+Verktøyet bruker samme `RecipientHasher` som tjenesten og skriver verken adressen eller nøkkelen.
+`-Xmx64m` hindrer at den ekstra JVM-en tar minne fra tjenesten, som har samme minnegrense (512 Mi).
+Slett filen etterpå.
+
+**2. Kjør SQL** med hashen i stedet for `<hash>`.
+
+Legg til opt-out (gjør ingenting hvis den finnes fra før):
+
+```sql
+INSERT INTO recipient_blocklist (recipient_hash, reason, source, expires_at)
+VALUES ('<hash>', 'OPT_OUT', 'MANUAL', NULL)
+ON CONFLICT (recipient_hash, reason) DO NOTHING;
+```
+
+Legg inn hard bounce manuelt (30 dager; forlenger en eksisterende blokkering, men forkorter den aldri):
+
+```sql
+INSERT INTO recipient_blocklist (recipient_hash, reason, source, expires_at)
+VALUES ('<hash>', 'HARD_BOUNCE', 'MANUAL', now() + interval '30 days')
+ON CONFLICT (recipient_hash, reason)
+DO UPDATE SET expires_at = GREATEST(recipient_blocklist.expires_at, EXCLUDED.expires_at);
+```
+
+Se status:
+
+```sql
+SELECT reason, source, created_at, expires_at FROM recipient_blocklist WHERE recipient_hash = '<hash>';
+```
+
+Fjern opt-out (en aktiv hard bounce står igjen):
+
+```sql
+DELETE FROM recipient_blocklist WHERE recipient_hash = '<hash>' AND reason = 'OPT_OUT';
+```
+
+Fjern all blokkering av mottakeren:
+
+```sql
+DELETE FROM recipient_blocklist WHERE recipient_hash = '<hash>';
+```
+
+Tabellen avviser ugyldige kombinasjoner: `OPT_OUT` kan ikke ha utløp, og `HARD_BOUNCE` må ha det.
+SQL-en over er dekket av `BlocklistIntegrationTest`.
+
 ## Maler
 
 Malene ligger i `app/src/main/resources/templates/<team>/email/<mal>/`, og mal-ID-en er
@@ -215,7 +304,9 @@ Alle grenser må være større enn 0, og `per-day` minst like stor som `per-hour
 en override med bare ett av feltene stopper også oppstarten.
 
 Ny nøkkel lages med `openssl rand -base64 32`. Bytter man nøkkel, kjenner tjenesten ikke lenger igjen
-mottakere som er lagret fra før; se [Database](docs/architecture.md#database).
+mottakere som er lagret fra før. Det gjelder også blokkeringslisten: opt-outs må da registreres på nytt,
+og hard bounces bygges opp igjen først når ACS rapporterer dem på nytt. Se
+[Mottaker-hashing](docs/architecture.md#mottaker-hashing).
 
 Flyway kjører migreringene i `app/src/main/resources/db/migration` ved oppstart.
 
@@ -258,7 +349,9 @@ For reactive applikasjoner: `CommunicationClients.createReactive(webClient)`, so
 ### Feil fra tjenesten
 
 Klienten kaster Springs vanlige unntak: `RestClientResponseException` (blokkerende) og
-`WebClientResponseException` (reactive), med ProblemDetail i bodyen. `429` betyr at mottakeren har
+`WebClientResponseException` (reactive), med ProblemDetail i bodyen. `422` betyr at mottakeren er
+blokkert (se [Blokkeringsliste](#blokkeringsliste)); meldingen bør droppes, siden et nytt forsøk gir
+samme svar. `429` betyr at mottakeren har
 nådd en grense (se [Grenser](#grenser)). Meldingen er ikke lagret, og den bør enten droppes eller
 sendes på nytt etter `Retry-After`. Ikke prøv på nytt i en løkke.
 
