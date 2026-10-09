@@ -1,5 +1,6 @@
 package no.novari.communication.message.domain
 
+import no.novari.communication.model.MessageStatus
 import no.novari.communication.model.Tenant
 import java.time.Clock
 import java.time.Instant

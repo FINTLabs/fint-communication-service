@@ -2,8 +2,9 @@ package no.novari.communication.message.dispatch
 
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.MeterRegistry
-import no.novari.communication.email.FailureReason
 import no.novari.communication.email.RetryReason
+import no.novari.communication.email.value
+import no.novari.communication.model.FailureReason
 import org.springframework.stereotype.Component
 
 @Component
