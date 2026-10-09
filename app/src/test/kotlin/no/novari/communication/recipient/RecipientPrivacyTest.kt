@@ -18,6 +18,9 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.system.CapturedOutput
 import org.springframework.boot.test.system.OutputCaptureExtension
 import org.springframework.jdbc.core.simple.JdbcClient
+import org.springframework.test.web.servlet.get
+import org.springframework.test.web.servlet.setup.MockMvcBuilders
+import org.springframework.web.context.WebApplicationContext
 
 @IntegrationTest
 @ExtendWith(OutputCaptureExtension::class)
@@ -36,6 +39,9 @@ class RecipientPrivacyTest {
 
     @Autowired
     lateinit var messageService: MessageService
+
+    @Autowired
+    lateinit var webApplicationContext: WebApplicationContext
 
     @BeforeEach
     fun sendUntilLimitedAndBlocked() {
@@ -96,6 +102,25 @@ class RecipientPrivacyTest {
         ADDRESSES.forEach { address ->
             assertThat(tagValues)
                 .noneMatch { it.contains(address.trim(), ignoreCase = true) }
+                .doesNotContain(hasher.hash(address).value)
+        }
+    }
+
+    @Test
+    fun `the prometheus scrape has the blocklist counter per tenant but neither address nor hash`() {
+        val scrape =
+            MockMvcBuilders
+                .webAppContextSetup(webApplicationContext)
+                .build()
+                .get("/actuator/prometheus")
+                .andExpect { status { isOk() } }
+                .andReturn()
+                .response.contentAsString
+
+        assertThat(scrape).containsPattern("""communication_blocklist_rejected_total\{[^}]*tenant="ROGALAND"""")
+        ADDRESSES.forEach { address ->
+            assertThat(scrape)
+                .doesNotContainIgnoringCase(address.trim())
                 .doesNotContain(hasher.hash(address).value)
         }
     }
