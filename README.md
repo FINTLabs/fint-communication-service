@@ -15,10 +15,13 @@ Se [docs/architecture.md](docs/architecture.md) for arkitektur, dataflyt og sekv
 ## Status
 
 `POST /api/v1/messages` tar imot e-post basert på maler og svarer `202 Accepted` med en
-meldings-ID. Meldingen sendes ikke ennå. Hver mottaker kan få høyst 10 meldinger per time og 40
+meldings-ID. Meldingen legges i en kø i databasen og sendes asynkront via leverandøren som er
+konfigurert (se [Utsending](#utsending)). Hver mottaker kan få høyst 10 meldinger per time og 40
 per døgn (se [Grenser](#grenser)), og mottakere som har meldt seg av eller hard-bouncet, avvises
-(se [Blokkeringsliste](#blokkeringsliste)). Layout, leverandøradapter og autentisering kommer i
-egne oppgaver under [FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
+(se [Blokkeringsliste](#blokkeringsliste)). Azure Communication Services (ACS) er klar i koden,
+men ressursen finnes ikke ennå (FFS-1965), så alle miljøer bruker foreløpig leverandøren `logging`,
+som logger og forkaster meldingen. Layout og autentisering kommer i egne oppgaver under
+[FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
 
 ## Moduler
 
@@ -65,8 +68,9 @@ men aldri emne eller innhold. `channel` bestemmer meldingstypen; i dag støttes 
 }
 ```
 
-Eksemplene viser en tenkt mal. Repoet inneholder foreløpig ingen maler; innholdet i de første
-malene er ikke bestemt.
+Eksemplene viser en tenkt mal. Repoet har foreløpig bare testmalen `novari/test` (én variabel,
+`melding`), som brukes for å verifisere utsending i et miljø; innholdet i de første ekte malene er
+ikke bestemt.
 
 Gyldig request gir `202 Accepted` med `{"id": "<uuid>"}`. Ugyldig request gir `400` som
 `application/problem+json` (RFC 9457), med ett element i `errors` per ugyldig felt. Meldingene
@@ -279,6 +283,29 @@ Regler, som sjekkes ved oppstart og i testene:
   endring av delimitere.
 - Verdier HTML-escapes i `body.html`. `subject` er ren tekst og må være én linje.
 
+## Utsending
+
+Meldingen som får `202`, ligger i tabellen `dispatch_queue` til den er sendt eller har feilet.
+Innholdet (adresse, emne og innhold) er kryptert med AES-GCM. En jobb i hver pod henter meldinger
+som er klare, hvert andre sekund, og sender dem via `EmailAdapter`. Flere pods deler køen uten å
+sende samme melding to ganger, og en melding som var under sending da en pod stoppet, sendes på
+nytt etter 5 minutter.
+
+| Utfall                                                                             | Hva skjer                                                                                                                |
+|------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
+| Sendt (ACS har bekreftet operasjonen)                                              | Raden slettes. `communication_message_sent_total` øker.                                                                  |
+| Forbigående feil (nettverk, 408, 429, 5xx, 401/403, ingen sluttstatus innen 2 min) | Nytt forsøk etter 1, 2, 4 … minutter (høyst 1 time mellom forsøkene; `Retry-After` fra ACS respekteres), høyst 8 forsøk. |
+| Permanent feil (andre 4xx, operasjonen feilet hos ACS)                             | Raden slettes. `communication_message_failed_total` øker, og en WARN-logg har årsak og ACS-feilkode.                     |
+| Forsøkene brukt opp                                                                | Som permanent feil, med årsak `retries-exhausted`.                                                                       |
+
+Konsumenten får ikke vite utfallet ennå; meldingsstatus per ID kommer i FFS-2337. Leverandøren
+velges med `communication.email.provider`:
+
+| Verdi     | Adapter               | Bruk                                                                                                         |
+|-----------|-----------------------|--------------------------------------------------------------------------------------------------------------|
+| `logging` | `LoggingEmailAdapter` | Default. Logger meldings-ID og mal og regner meldingen som sendt. Lokalt, i tester og i beta til ACS finnes. |
+| `acs`     | `AcsEmailAdapter`     | Sender via Azure Communication Services. Krever connection string og avsenderadresse.                        |
+
 ## Lokal utvikling
 
 Krever Java 25 og Docker. Testene og lokal kjøring starter Postgres med Testcontainers.
@@ -294,7 +321,14 @@ med Jackson 2 (`:client:test`) og Spring Framework 7 med Jackson 3 (`:client:tes
 ./gradlew :app:bootTestRun
 ```
 
-`bootTestRun` starter appen med en Postgres-container og en testnøkkel for mottaker-hashing.
+`bootTestRun` starter appen med en Postgres-container og testnøkler for mottaker-hashing og
+kryptering av køen. Leverandøren er `logging`, så ingenting sendes. Testmalen viser hele flyten:
+
+```bash
+curl -i -X POST localhost:8080/api/v1/messages -H 'Content-Type: application/json' -d '{"tenant":"NOVARI","message":{"channel":"EMAIL","to":"test@novari.no","templateId":"novari/test","variables":{"melding":"Hei"}}}'
+```
+
+Loggen viser `Melding mottatt`, `E-post ikke sendt (provider=logging)` og `Melding sendt`.
 
 Loggen er JSON, også lokalt og i testene. Lesbar tekst får man med et tomt format:
 
@@ -304,23 +338,35 @@ Loggen er JSON, også lokalt og i testene. Lesbar tekst får man med et tomt for
 
 ## Konfigurasjon
 
-| Variabel                                                                                      | Innhold                                                                                              |
-|-----------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
-| `fint.database.url`, `fint.database.username`, `fint.database.password`                       | Settes av Flais fra `spec.database` (`fint-common`).                                                 |
-| `COMMUNICATION_RECIPIENT_HASHING_KEY`                                                         | HMAC-nøkkel for mottaker-hashing, base64, minst 32 bytes. Fra 1Password. Oppstarten feiler uten den. |
-| `communication.limits.recipient.per-hour`, `communication.limits.recipient.per-day`           | Grenser per mottaker (10 og 40) i `application.yaml`.                                                |
-| `communication.limits.tenant.default.per-hour`, `communication.limits.tenant.default.per-day` | Grenser per tenant (100 og 500, ikke bekreftet) i `application.yaml`.                                |
-| `communication.limits.tenant.overrides.<TENANT>.per-hour`, `...per-day`                       | Valgfri override per tenant. Nøkkelen er enum-navnet i `Tenant`, og begge feltene må settes.         |
-| `communication.limits.total.per-hour`, `communication.limits.total.per-day`                   | Grenser for alle tenants samlet (500 og 2000, ikke bekreftet) i `application.yaml`.                  |
-| `communication.limits.usage-refresh`                                                          | Hvor ofte utnyttelsen av grensene regnes ut fra databasen. `60s` i `application.yaml`.               |
-| `logging.structured.format.console`                                                           | Loggformat. `logstash` (JSON til stdout) i `application.yaml`.                                       |
-| `logging.level.<pakke>` (eller `LOGGING_LEVEL_<PAKKE>`)                                       | Log-nivå per pakke, f.eks. `logging.level.no.novari.communication=DEBUG`. Default `INFO`.            |
+| Variabel                                                                                                              | Innhold                                                                                                                             |
+|-----------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| `fint.database.url`, `fint.database.username`, `fint.database.password`                                               | Settes av Flais fra `spec.database` (`fint-common`).                                                                                |
+| `COMMUNICATION_RECIPIENT_HASHING_KEY`                                                                                 | HMAC-nøkkel for mottaker-hashing, base64, minst 32 bytes. Fra 1Password. Oppstarten feiler uten den.                                |
+| `COMMUNICATION_DISPATCH_ENCRYPTION_KEY`                                                                               | AES-nøkkel for innholdet i køen, base64, nøyaktig 32 bytes. Fra 1Password. Oppstarten feiler uten den.                              |
+| `communication.email.provider`                                                                                        | `logging` (default) eller `acs`. Ukjent verdi stopper oppstarten.                                                                   |
+| `communication.email.sender`                                                                                          | Avsenderadressen. Påkrevd med `acs`, og må være verifisert i ACS.                                                                   |
+| `COMMUNICATION_EMAIL_ACS_CONNECTION_STRING`                                                                           | Connection string til ACS-ressursen. Fra 1Password. Påkrevd med `acs`.                                                              |
+| `communication.email.acs.operation-timeout`                                                                           | Hvor lenge det ventes på at ACS bekrefter en sending. `2m` i `application.yaml`.                                                    |
+| `communication.dispatch.poll-interval`, `communication.dispatch.batch-size`                                           | Hvor ofte køen sjekkes (`2s`) og hvor mange meldinger som hentes om gangen (`10`).                                                  |
+| `communication.dispatch.lease`                                                                                        | Hvor lenge en melding er reservert av en pod før en annen kan ta den (`5m`).                                                        |
+| `communication.dispatch.max-attempts`, `communication.dispatch.initial-backoff`, `communication.dispatch.max-backoff` | Antall forsøk og ventetid mellom dem (`8`, `1m`, `1h`).                                                                             |
+| `communication.dispatch.queue-metrics-refresh`                                                                        | Hvor ofte kø-metrikkene regnes ut fra databasen (`60s`).                                                                            |
+| `communication.limits.recipient.per-hour`, `communication.limits.recipient.per-day`                                   | Grenser per mottaker (10 og 40) i `application.yaml`.                                                                               |
+| `communication.limits.tenant.default.per-hour`, `communication.limits.tenant.default.per-day`                         | Grenser per tenant (100 og 500, ikke bekreftet) i `application.yaml`.                                                               |
+| `communication.limits.tenant.overrides.<TENANT>.per-hour`, `...per-day`                                               | Valgfri override per tenant. Nøkkelen er enum-navnet i `Tenant`, og begge feltene må settes.                                        |
+| `communication.limits.total.per-hour`, `communication.limits.total.per-day`                                           | Grenser for alle tenants samlet (500 og 2000, ikke bekreftet) i `application.yaml`.                                                 |
+| `communication.limits.usage-refresh`                                                                                  | Hvor ofte utnyttelsen av grensene regnes ut fra databasen. `60s` i `application.yaml`.                                              |
+| `logging.structured.format.console`                                                                                   | Loggformat. `logstash` (JSON til stdout) i `application.yaml`.                                                                      |
+| `logging.level.<pakke>` (eller `LOGGING_LEVEL_<PAKKE>`)                                                               | Log-nivå per pakke, f.eks. `logging.level.no.novari.communication=DEBUG`. Default `INFO`.                                           |
+| `logging.level.com.azure`                                                                                             | `off` i `application.yaml`. Azure-SDK-ets logger kan sitere adresser fra svarene til ACS; ikke skru den på i beta eller produksjon. |
 
 Alle grenser må være større enn 0, og `per-day` minst like stor som `per-hour`. Tenantgrensene
 (`default` og hver override) kan ikke være høyere enn totalgrensen. Ukjent tenant i `overrides` eller
 en override med bare ett av feltene stopper også oppstarten.
 
-Ny nøkkel lages med `openssl rand -base64 32`. Bytter man nøkkel, kjenner tjenesten ikke lenger igjen
+Nye nøkler lages med `openssl rand -base64 32`. Bytter man krypteringsnøkkelen for køen, kan
+meldinger som ligger i køen, ikke lenger dekrypteres, og de feiler etter siste forsøk. Bytt den
+derfor når køen er tom (`communication_dispatch_queue_size` er 0). Bytter man hashing-nøkkelen, kjenner tjenesten ikke lenger igjen
 mottakere som er lagret fra før. Det gjelder også blokkeringslisten: opt-outs må da registreres på nytt,
 og hard bounces bygges opp igjen først når ACS rapporterer dem på nytt. Se
 [Mottaker-hashing](docs/architecture.md#mottaker-hashing).
@@ -405,19 +451,24 @@ Opprett en GitHub-release med tag `vX.Y.Z`. `Publish to Reposilite`-workflowen p
 Tjenesten publiserer disse metrikkene på `/actuator/prometheus`, i tillegg til Spring Boots egne. Ingen
 av dem har adresse eller hash som tag.
 
-| Metrikk                                  | Tagger                                            | Betydning                                                |
-|------------------------------------------|---------------------------------------------------|----------------------------------------------------------|
-| `communication_message_accepted_total`   | `tenant`, `channel`                               | Aksepterte meldinger (`202`).                            |
-| `communication_limit_rejected_total`     | `limit` (`mottaker`, `tenant`, `total`), `tenant` | Meldinger avvist av en grense (`429`).                   |
-| `communication_blocklist_rejected_total` | `tenant`                                          | Meldinger avvist fordi mottakeren er blokkert (`422`).   |
-| `communication_limit_tenant_usage_ratio` | `tenant`, `window` (`hour`, `day`)                | Forbruk delt på tenantgrensen, siste time og siste døgn. |
-| `communication_limit_total_usage_ratio`  | `window` (`hour`, `day`)                          | Forbruk delt på totalgrensen, siste time og siste døgn.  |
+| Metrikk                                       | Tagger                                            | Betydning                                                |
+|-----------------------------------------------|---------------------------------------------------|----------------------------------------------------------|
+| `communication_message_accepted_total`        | `tenant`, `channel`                               | Aksepterte meldinger (`202`).                            |
+| `communication_limit_rejected_total`          | `limit` (`mottaker`, `tenant`, `total`), `tenant` | Meldinger avvist av en grense (`429`).                   |
+| `communication_blocklist_rejected_total`      | `tenant`                                          | Meldinger avvist fordi mottakeren er blokkert (`422`).   |
+| `communication_limit_tenant_usage_ratio`      | `tenant`, `window` (`hour`, `day`)                | Forbruk delt på tenantgrensen, siste time og siste døgn. |
+| `communication_limit_total_usage_ratio`       | `window` (`hour`, `day`)                          | Forbruk delt på totalgrensen, siste time og siste døgn.  |
+| `communication_message_sent_total`            | `tenant`, `channel`                               | Meldinger sendt til leverandøren.                        |
+| `communication_message_retried_total`         | `tenant`, `channel`, `reason`                     | Forbigående feil som gir nytt forsøk.                    |
+| `communication_message_failed_total`          | `tenant`, `channel`, `reason`                     | Meldinger som ikke ble sendt.                            |
+| `communication_dispatch_queue_size`           | –                                                 | Meldinger i køen.                                        |
+| `communication_dispatch_queue_oldest_seconds` | –                                                 | Alderen på den eldste meldingen i køen.                  |
 
-Utnyttelsen regnes ut fra databasen hvert minutt og er lik på alle replikaer, så bruk `max` og ikke
-`sum` på tvers av pods.
+Utnyttelsen og kø-metrikkene regnes ut fra databasen hvert minutt og er like på alle replikaer, så
+bruk `max` og ikke `sum` på tvers av pods.
 
 **Dashboard.** [`grafana/fint-communication-service.json`](grafana/fint-communication-service.json)
-viser utnyttelse, avvisninger og aksepterte meldinger per tenant. Det importeres manuelt i Grafana
+viser utnyttelse, avvisninger, aksepterte, sendte og feilede meldinger per tenant, og utsendingskøen. Det importeres manuelt i Grafana
 (Dashboards → New → Import → last opp filen, og velg Prometheus-datakilden). Endringer gjøres i Grafana,
 eksporteres som JSON og legges inn i repoet med PR.
 
@@ -426,7 +477,9 @@ eksporteres som JSON og legges inn i repoet med PR.
 - utnyttelse av en tenant- eller totalgrense over 80 %,
 - alle avvisninger på tenant- og totalgrensen,
 - over 10 avvisninger på mottakergrensen per tenant per time,
-- over 10 blokkerte innsendinger per tenant per time.
+- over 10 blokkerte innsendinger per tenant per time,
+- meldinger som ikke ble sendt,
+- en melding som har ligget i køen i over 15 minutter.
 
 Reglene registreres manuelt i Grafana Alerts med uttrykkene, tersklene og varighetene i runbooken.
 
@@ -440,4 +493,31 @@ Push til `main` bygger image (CI) og deployer til beta (CD). `MD`-workflowen byg
 manuelt. Produksjon (`api`) er ikke satt opp ennå.
 
 Beta henter hemmeligheter fra 1Password-itemet `vaults/aks-beta-vault/items/fint-communication-service`,
-som må ha feltet `COMMUNICATION_RECIPIENT_HASHING_KEY`.
+som må ha feltene `COMMUNICATION_RECIPIENT_HASHING_KEY` og `COMMUNICATION_DISPATCH_ENCRYPTION_KEY`.
+Mangler et av dem, starter ikke podden.
+
+### Slå på ACS
+
+Når ACS-ressursen, domenet og avsenderadressen finnes (FFS-1965):
+
+1. Legg connection string fra ACS-ressursen (Keys i Azure-portalen) inn som feltet
+   `COMMUNICATION_EMAIL_ACS_CONNECTION_STRING` i 1Password-itemet.
+2. Sett leverandør og avsender i overlayet og deploy:
+
+   ```yaml
+   - op: add
+     path: "/spec/env/-"
+     value:
+       name: "communication.email.provider"
+       value: "acs"
+   - op: add
+     path: "/spec/env/-"
+     value:
+       name: "communication.email.sender"
+       value: "no-reply@<verifisert domene>"
+   ```
+
+3. Følg [Verifisere utsending](docs/runbook.md#verifisere-utsending) i runbooken.
+
+Mangler connection string eller avsender når leverandøren er `acs`, stopper oppstarten med en melding
+som nevner variabelnavnet, aldri verdien.

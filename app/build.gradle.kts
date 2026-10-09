@@ -11,6 +11,7 @@ tasks.jar {
 
 extra["tomcat.version"] = "11.0.26"
 extra["jackson-bom.version"] = "3.1.7"
+extra["jackson-2-bom.version"] = "2.21.7"
 
 springBoot {
     mainClass.set("no.novari.communication.ApplicationKt")
@@ -37,6 +38,10 @@ dependencies {
     implementation("tools.jackson.dataformat:jackson-dataformat-yaml")
     implementation("com.samskivert:jmustache")
     implementation("io.github.oshai:kotlin-logging-jvm:8.0.4")
+    implementation("com.azure:azure-communication-email:1.1.6") {
+        exclude(group = "com.azure", module = "azure-core-http-netty")
+    }
+    implementation("com.azure:azure-core-http-jdk-httpclient:1.2.0")
 
     testImplementation("org.springframework.boot:spring-boot-starter-actuator-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
