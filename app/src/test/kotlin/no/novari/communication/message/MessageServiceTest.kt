@@ -5,6 +5,7 @@ import no.novari.communication.blocklist.RecipientBlockedException
 import no.novari.communication.limit.LimitExceededException
 import no.novari.communication.limit.LimitType
 import no.novari.communication.message.domain.EmailPayload
+import no.novari.communication.message.domain.MessageChannel
 import no.novari.communication.message.domain.MessageStatus
 import no.novari.communication.message.domain.OutgoingMessage
 import no.novari.communication.model.Tenant
@@ -24,6 +25,7 @@ class MessageServiceTest {
     private val hasher = RecipientHasher(Base64.getDecoder().decode(TEST_RECIPIENT_HASHING_KEY))
     private val dispatched = mutableListOf<OutgoingMessage>()
     private val limited = mutableListOf<Pair<OutgoingMessage, RecipientHash>>()
+    private val events = mutableListOf<Any>()
     private var limitExceeded = false
     private var blocked = false
     private val service =
@@ -39,6 +41,7 @@ class MessageServiceTest {
                 }
                 limited += message to recipient
             },
+            eventPublisher = events::add,
             clock = Clock.fixed(now, ZoneOffset.UTC),
         )
     private val payload = EmailPayload(templateId = "team/mal", to = "ola@rogfk.no", subject = "Emne", body = "Innhold")
@@ -82,5 +85,23 @@ class MessageServiceTest {
             .isInstanceOf(RecipientBlockedException::class.java)
         assertThat(limited).isEmpty()
         assertThat(dispatched).isEmpty()
+    }
+
+    @Test
+    fun `an accepted message is published with tenant and channel`() {
+        service.receive(Tenant.ROGALAND, payload)
+
+        assertThat(events).containsExactly(MessageAccepted(Tenant.ROGALAND, MessageChannel.EMAIL))
+    }
+
+    @Test
+    fun `a rejected or failed message is not published as accepted`() {
+        limitExceeded = true
+        assertThatThrownBy { service.receive(Tenant.ROGALAND, payload) }
+        limitExceeded = false
+        blocked = true
+        assertThatThrownBy { service.receive(Tenant.ROGALAND, payload) }
+
+        assertThat(events).isEmpty()
     }
 }

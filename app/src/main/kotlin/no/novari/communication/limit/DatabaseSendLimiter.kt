@@ -1,5 +1,7 @@
 package no.novari.communication.limit
 
+import io.micrometer.core.instrument.Counter
+import io.micrometer.core.instrument.MeterRegistry
 import no.novari.communication.message.domain.OutgoingMessage
 import no.novari.communication.recipient.RecipientHash
 import org.springframework.stereotype.Component
@@ -13,6 +15,7 @@ import java.time.Instant
 class DatabaseSendLimiter(
     private val repository: SendUsageRepository,
     private val properties: LimitProperties,
+    private val meterRegistry: MeterRegistry,
     private val clock: Clock,
 ) : SendLimiter {
     private val recipientLimits = properties.recipient.slidingWindows()
@@ -45,6 +48,12 @@ class DatabaseSendLimiter(
                 .maxByOrNull { (_, retryAfter) -> retryAfter }
         if (exceeded != null) {
             val (type, retryAfter) = exceeded
+            Counter
+                .builder(REJECTED_METRIC)
+                .tag("limit", type.value)
+                .tag("tenant", message.tenant.name)
+                .register(meterRegistry)
+                .increment()
             throw LimitExceededException(type, message.tenant, message.id, retryAfter)
         }
         repository.record(message.id, recipient, message.tenant, now)
@@ -59,6 +68,7 @@ class DatabaseSendLimiter(
     ): Duration? = mapNotNull { it.retryAfter(sentTimes, now) }.maxOrNull()
 
     companion object {
+        const val REJECTED_METRIC = "communication.limit.rejected"
         val HOUR: Duration = Duration.ofHours(1)
         val DAY: Duration = Duration.ofDays(1)
         private val LOCK_TIMEOUT: Duration = Duration.ofSeconds(5)

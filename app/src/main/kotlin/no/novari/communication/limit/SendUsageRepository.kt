@@ -69,6 +69,25 @@ class SendUsageRepository(
             .query { rs, _ -> rs.getObject("sent_at", OffsetDateTime::class.java).toInstant() }
             .list()
 
+    fun countPerTenantSince(
+        hourAgo: Instant,
+        dayAgo: Instant,
+    ): Map<Tenant, TenantUsage> =
+        jdbcClient
+            .sql(
+                """
+                SELECT tenant, count(*) FILTER (WHERE sent_at > :hourAgo) AS last_hour, count(*) AS last_day
+                FROM send_usage
+                WHERE sent_at > :dayAgo
+                GROUP BY tenant
+                """.trimIndent(),
+            ).param("hourAgo", hourAgo.toOffsetDateTime())
+            .param("dayAgo", dayAgo.toOffsetDateTime())
+            .query { rs, _ ->
+                Tenant.valueOf(rs.getString("tenant")) to TenantUsage(rs.getInt("last_hour"), rs.getInt("last_day"))
+            }.list()
+            .toMap()
+
     fun record(
         messageId: MessageId,
         recipient: RecipientHash,
