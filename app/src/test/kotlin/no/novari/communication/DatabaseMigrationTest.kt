@@ -35,4 +35,15 @@ class DatabaseMigrationTest {
             "send_usage_sent_at",
         )
     }
+
+    @Test
+    fun `recipient_blocklist has a primary key per hash and reason and an index for the cleanup`() {
+        val indexes =
+            jdbcClient
+                .sql("SELECT indexname FROM pg_indexes WHERE tablename = 'recipient_blocklist'")
+                .query(String::class.java)
+                .list()
+
+        assertThat(indexes).contains("recipient_blocklist_pkey", "recipient_blocklist_expires_at")
+    }
 }
