@@ -31,6 +31,7 @@ import java.time.Duration
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
+import java.time.temporal.ChronoUnit
 
 @IntegrationTest
 @ExtendWith(OutputCaptureExtension::class)
@@ -203,8 +204,8 @@ class BlocklistIntegrationTest {
     @Test
     fun `a new hard bounce extends an existing block but never shortens it`() {
         val hash = hasher.hash(ADDRESS).value
-        val soon = Instant.now().plus(Duration.ofDays(1))
-        val later = Instant.now().plus(Duration.ofDays(100))
+        val soon = Instant.now().plus(Duration.ofDays(1)).truncatedTo(ChronoUnit.MICROS)
+        val later = Instant.now().plus(Duration.ofDays(100)).truncatedTo(ChronoUnit.MICROS)
 
         block(HARD_BOUNCE, expiresAt = soon)
         runRoutine(ADD_HARD_BOUNCE, hash)
