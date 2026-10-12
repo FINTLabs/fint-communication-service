@@ -7,20 +7,19 @@ import org.springframework.transaction.annotation.Propagation
 import org.springframework.transaction.annotation.Transactional
 import java.time.Clock
 import java.time.Duration
+import java.time.Instant
 
 @Component
 class DatabaseSendLimiter(
     private val repository: SendUsageRepository,
-    properties: LimitProperties,
+    private val properties: LimitProperties,
     private val clock: Clock,
 ) : SendLimiter {
-    private val recipientLimits =
-        listOf(
-            SlidingWindowLimit(properties.recipient.perHour, HOUR),
-            SlidingWindowLimit(properties.recipient.perDay, DAY),
-        )
+    private val recipientLimits = properties.recipient.slidingWindows()
+    private val totalLimits = properties.total.slidingWindows()
 
-    // Låsen slippes først ved commit, så kallerens transaksjon må også dekke dispatch.
+    // Låsene slippes først ved commit, så kallerens transaksjon må også dekke dispatch.
+    // Den globale låsen serialiserer alle innsendinger og dekker dermed også tenantgrensen.
     @Transactional(propagation = Propagation.MANDATORY)
     override fun checkAndRecord(
         message: OutgoingMessage,
@@ -28,15 +27,36 @@ class DatabaseSendLimiter(
     ) {
         repository.setLockTimeout(LOCK_TIMEOUT)
         repository.lockRecipient(recipient)
-        // Leses etter låsen: receivedAt kan være flere sekunder gammelt hvis forespørselen ventet på låsen.
+        repository.lockTotal()
+        // Leses etter låsene: receivedAt kan være flere sekunder gammelt hvis forespørselen ventet på en lås.
         val now = clock.instant()
-        val sentTimes = repository.recipientSentTimesSince(recipient, now - DAY)
-        val retryAfter = recipientLimits.mapNotNull { it.retryAfter(sentTimes, now) }.maxOrNull()
-        if (retryAfter != null) {
-            throw LimitExceededException(LimitType.RECIPIENT, message.tenant, message.id, retryAfter)
+        val since = now - DAY
+        val exceeded =
+            listOf(
+                LimitType.RECIPIENT to
+                    recipientLimits.retryAfter(repository.recipientSentTimesSince(recipient, since), now),
+                LimitType.TENANT to
+                    properties.tenant
+                        .forTenant(message.tenant)
+                        .slidingWindows()
+                        .retryAfter(repository.tenantSentTimesSince(message.tenant, since), now),
+                LimitType.TOTAL to totalLimits.retryAfter(repository.sentTimesSince(since), now),
+            ).mapNotNull { (type, retryAfter) -> retryAfter?.let { type to it } }
+                .maxByOrNull { (_, retryAfter) -> retryAfter }
+        if (exceeded != null) {
+            val (type, retryAfter) = exceeded
+            throw LimitExceededException(type, message.tenant, message.id, retryAfter)
         }
         repository.record(message.id, recipient, message.tenant, now)
     }
+
+    private fun WindowLimits.slidingWindows(): List<SlidingWindowLimit> =
+        listOf(SlidingWindowLimit(perHour, HOUR), SlidingWindowLimit(perDay, DAY))
+
+    private fun List<SlidingWindowLimit>.retryAfter(
+        sentTimes: List<Instant>,
+        now: Instant,
+    ): Duration? = mapNotNull { it.retryAfter(sentTimes, now) }.maxOrNull()
 
     companion object {
         val HOUR: Duration = Duration.ofHours(1)
