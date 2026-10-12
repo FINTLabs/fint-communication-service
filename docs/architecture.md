@@ -744,11 +744,7 @@ sequenceDiagram
         PC-->>W: EmailPayload
         W->>A: send(id, payload)
         A->>ACS: POST /emails:send (Operation-Id = meldings-ID)
-        ACS-->>A: 202 + Operation-Location
-        loop Til sluttstatus, høyst 2 min
-            A->>ACS: GET operasjonen
-            ACS-->>A: Running, Succeeded eller Failed
-        end
+        ACS-->>A: 202, 4xx eller 5xx
         A-->>W: Sent, Retryable eller Permanent
         alt Sent eller Permanent
             Note over W,DB: Én transaksjon
@@ -763,25 +759,29 @@ sequenceDiagram
 - **Utfall.** Adapteren kaster ikke feil, men returnerer `EmailSendOutcome`: `Sent`,
   `Retryable(årsak, Retry-After)` eller `Permanent(årsak)`. Workeren logger utfallet og teller det.
 
-  | Svar fra ACS                                  | Utfall                      | `reason`           |
-  |-----------------------------------------------|-----------------------------|--------------------|
-  | Operasjonen `Succeeded`                       | `Sent`                      | –                  |
-  | Operasjonen `Failed` eller `Canceled`         | `Permanent`                 | `operation-failed` |
-  | 400, 404, 413 og andre 4xx                    | `Permanent`                 | `rejected`         |
-  | 401, 403                                      | `Retryable`                 | `unauthorized`     |
-  | 408, ingen sluttstatus innen 2 min            | `Retryable`                 | `timeout`          |
-  | 429                                           | `Retryable` (`Retry-After`) | `throttled`        |
-  | 5xx                                           | `Retryable`                 | `server-error`     |
-  | Nettverksfeil                                 | `Retryable`                 | `io`               |
-  | Annen feil i adapteren eller ved dekryptering | `Retryable`                 | `unexpected`       |
+  | Svar fra ACS                                  | Utfall                      | `reason`       |
+  |-----------------------------------------------|-----------------------------|----------------|
+  | 202                                           | `Sent`                      | –              |
+  | 400, 404, 413 og andre 4xx                    | `Permanent`                 | `rejected`     |
+  | 401, 403                                      | `Retryable`                 | `unauthorized` |
+  | 408                                           | `Retryable`                 | `timeout`      |
+  | 429                                           | `Retryable` (`Retry-After`) | `throttled`    |
+  | 5xx                                           | `Retryable`                 | `server-error` |
+  | Nettverksfeil                                 | `Retryable`                 | `io`           |
+  | Annen feil i adapteren eller ved dekryptering | `Retryable`                 | `unexpected`   |
 
   401 og 403 regnes som forbigående, siden de skyldes konfig (nøkkel rotert eller feil), og meldingen
   da kan sendes når konfigen er rettet. `reason` i metrikker og logg er `failureReason` i
-  status-svaret med små bokstaver og bindestrek (`OPERATION_FAILED` blir `operation-failed`).
-- **Retry.** Azure-SDK-et prøver selv tre ganger på nettverksfeil, 408, 429 og 5xx før adapteren får
-  svaret. I tillegg prøver workeren på nytt etter 1, 2, 4 … minutter, høyst 1 time mellom forsøkene,
-  og høyst 8 forsøk (ca. 2 timer). `Retry-After` fra ACS brukes når den er lengre. Når forsøkene er
-  brukt opp, feiler meldingen med `retries-exhausted`.
+  status-svaret med små bokstaver og bindestrek (`RETRIES_EXHAUSTED` blir `retries-exhausted`).
+- **Ingen venting på operasjonen.** `202` betyr at ACS har tatt imot sendingen, og adapteren spør
+  aldri om status for operasjonen. Statusoppslag har en egen kvote hos ACS (200 per time per
+  subscription), og SDK-et ville gjort minst ett oppslag per sending. Hva som skjer etter `202`
+  (levert, bounce, undertrykt mottaker, spam, feil), kommer med leveringsrapportene.
+- **Retry.** Azure-SDK-et prøver selv tre ganger på nettverksfeil, 408 og 5xx før adapteren får
+  svaret, men ikke på 429 (`ThrottlingNotRetried`). ACS teller også avviste forespørsler mot kvoten,
+  så nye forsøk under struping forlenger den. I tillegg prøver workeren på nytt etter 1, 2, 4 …
+  minutter, høyst 1 time mellom forsøkene, og høyst 8 forsøk (ca. 2 timer). `Retry-After` fra ACS
+  brukes når den er lengre. Når forsøkene er brukt opp, feiler meldingen med `retries-exhausted`.
 - **Idempotens.** `OperationIdPolicy` setter HTTP-headeren `Operation-Id` til meldings-ID-en på
   sendingen. Alle forsøk, også SDK-ets egne og forsøk etter en restart, har dermed samme ID hos ACS,
   og leveringsrapportene fra ACS kan knyttes til meldingen (se [Leveringsrapporter](#leveringsrapporter)). ACS dokumenterer ikke hva som
@@ -791,14 +791,15 @@ sequenceDiagram
 - **Restart og flere replikaer.** Reservasjonen er én `UPDATE … WHERE message_id IN (SELECT … FOR
   UPDATE SKIP LOCKED)`, så to replikaer får aldri samme rad. En reservert melding har `locked_until`
   (lease, 5 min). Stopper podden midt i en sending, tas meldingen på nytt når leasen er ute. Leasen
-  er lengre enn 2 minutter venting på ACS pluss SDK-ets retry.
+  er lengre enn et kall til ACS med SDK-ets retry.
 - **Sent svar.** Sletting og ny planlegging gjelder bare raden med samme `attempts` som da den ble
   reservert. Sluttstatus skrives til `message` i samme transaksjon som slettingen, og bare når
   slettingen traff. Et svar som kommer etter at en annen replika har tatt over meldingen, endrer
   derfor verken køen eller status; workeren logger det. Status endres dessuten bare fra `RECEIVED`.
-- **Rapport før svaret.** En leveringsrapport kan komme mens workeren venter på ACS. Får workeren da
-  en forbigående feil, men status er allerede satt av en rapport, slettes raden i køen uten nytt forsøk
-  (ACS har bevislig tatt imot meldingen), og meldingen telles som sendt.
+- **Rapport før svaret.** En leveringsrapport kan komme før workeren har lagret utfallet, f.eks. når
+  ACS sendte meldingen, men svaret ble borte eller kom som en feil. Får workeren da en forbigående
+  feil, men status er allerede satt av en rapport, slettes raden i køen uten nytt forsøk (ACS har
+  bevislig tatt imot meldingen), og meldingen telles som sendt.
 - **Innhold.** `PayloadCodec` serialiserer adresse, emne, innhold og `replyTo` til JSON og krypterer
   det med AES-256-GCM (`PayloadCipher`, tilfeldig nonce per melding). Meldings-ID-en er associated
   data, så krypterte bytes kan ikke flyttes til en annen rad. `tenant`, `channel` og `templateId`
@@ -892,9 +893,9 @@ sequenceDiagram
 - **Knytning.** `data.messageId` er operasjons-ID-en hos ACS, altså meldings-ID-en (`Operation-Id`).
 - **Overganger.** En rapport setter status bare når den er `RECEIVED` eller `SENT`. Rapportstatusene er
   endelige, så den første rapporten vinner og senere rapporter endrer ikke status. `RECEIVED` er med
-  fordi workeren venter opptil 2 minutter på ACS, og rapporten kan komme før `SENT` er lagret;
-  workeren endrer bare en status som fortsatt er `RECEIVED`. `Expanded` (distribusjonsliste) gir
-  ingen status; medlemmene får egne rapporter.
+  fordi rapporten kan komme før `SENT` er lagret (se «Rapport før svaret» under
+  [utsending](#hva-skjer-med-meldingen-etter-202)); workeren endrer bare en status som fortsatt er
+  `RECEIVED`. `Expanded` (distribusjonsliste) gir ingen status; medlemmene får egne rapporter.
 - **Blokkering.** `Bounced` og `Suppressed` (ACS har sett en hard bounce før) gir `HARD_BOUNCE` med
   `source = 'ACS'` og utløp 30 dager etter tidspunktet i hendelsen (`deliveryAttemptTimeStamp`,
   ellers `time`; `communication.email.delivery-reports.block-for`). Som i driftsrutinen forlenges en
@@ -1224,15 +1225,15 @@ GET /api/v1/messages/0d6f7e0a-3c1b-4f53-9a35-0a4f8f7f2b11
 }
 ```
 
-| Status          | Betyr                                                                                                                                                                                                                                   | Settes av                                                                     |
-|-----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------|
-| `RECEIVED`      | Akseptert og i køen. Gjelder også mens et forsøk pågår og mens et nytt forsøk venter.                                                                                                                                                   | `MessageService.receive`, i samme transaksjon som køraden.                    |
-| `SENT`          | ACS har tatt imot meldingen for levering (operasjonen er `Succeeded`). Ikke det samme som levert.                                                                                                                                       | `DispatchWorker`, i samme transaksjon som slettingen i køen.                  |
-| `FAILED`        | Ikke sendt eller ikke levert, og tjenesten prøver ikke igjen. `failureReason` er `REJECTED`, `OPERATION_FAILED` eller `RETRIES_EXHAUSTED` (se [utfallene](#hva-skjer-med-meldingen-etter-202)), eller `DELIVERY_FAILED` fra en rapport. | `DispatchWorker`, som for `SENT`, eller `DeliveryReportProcessor` (`Failed`). |
-| `DELIVERED`     | Mottakerens e-postserver har tatt imot meldingen. Ikke det samme som lest eller lagt i innboksen.                                                                                                                                       | `DeliveryReportProcessor` (`Delivered`).                                      |
-| `BOUNCED`       | Hard bounce: adressen eller domenet finnes ikke. Mottakeren blokkeres i 30 dager.                                                                                                                                                       | `DeliveryReportProcessor` (`Bounced`).                                        |
-| `SUPPRESSED`    | ACS sendte ikke, fordi adressen har hard-bouncet før. Mottakeren blokkeres i 30 dager.                                                                                                                                                  | `DeliveryReportProcessor` (`Suppressed`).                                     |
-| `FILTERED_SPAM` | Mottakerens server avviste meldingen som spam eller satte den i karantene.                                                                                                                                                              | `DeliveryReportProcessor` (`FilteredSpam`, `Quarantined`).                    |
+| Status          | Betyr                                                                                                                                                                                                               | Settes av                                                                     |
+|-----------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------|
+| `RECEIVED`      | Akseptert og i køen. Gjelder også mens et forsøk pågår og mens et nytt forsøk venter.                                                                                                                               | `MessageService.receive`, i samme transaksjon som køraden.                    |
+| `SENT`          | ACS har tatt imot meldingen for levering (`202`). Ikke det samme som levert.                                                                                                                                        | `DispatchWorker`, i samme transaksjon som slettingen i køen.                  |
+| `FAILED`        | Ikke sendt eller ikke levert, og tjenesten prøver ikke igjen. `failureReason` er `REJECTED` eller `RETRIES_EXHAUSTED` (se [utfallene](#hva-skjer-med-meldingen-etter-202)), eller `DELIVERY_FAILED` fra en rapport. | `DispatchWorker`, som for `SENT`, eller `DeliveryReportProcessor` (`Failed`). |
+| `DELIVERED`     | Mottakerens e-postserver har tatt imot meldingen. Ikke det samme som lest eller lagt i innboksen.                                                                                                                   | `DeliveryReportProcessor` (`Delivered`).                                      |
+| `BOUNCED`       | Hard bounce: adressen eller domenet finnes ikke. Mottakeren blokkeres i 30 dager.                                                                                                                                   | `DeliveryReportProcessor` (`Bounced`).                                        |
+| `SUPPRESSED`    | ACS sendte ikke, fordi adressen har hard-bouncet før. Mottakeren blokkeres i 30 dager.                                                                                                                              | `DeliveryReportProcessor` (`Suppressed`).                                     |
+| `FILTERED_SPAM` | Mottakerens server avviste meldingen som spam eller satte den i karantene.                                                                                                                                          | `DeliveryReportProcessor` (`FilteredSpam`, `Quarantined`).                    |
 
 - **Ingen PROCESSING.** At en melding er reservert av en pod, er bare `locked_until` i køen.
   Konsumenten trenger å vite om meldingen er ferdig, ikke om et forsøk pågår akkurat nå.
@@ -1251,8 +1252,8 @@ er levert. ACS rapporterer levering, bounce, undertrykt mottaker, spamfilter og 
 da `DELIVERED`, `BOUNCED`, `SUPPRESSED`, `FILTERED_SPAM` eller `FAILED` (se
 [Leveringsrapporter](#leveringsrapporter)). Rapportstatusene er endelige; den første rapporten
 vinner. Så lenge mottaket er slått av (til FFS-2339), er `SENT` siste status for en melding som gikk
-gjennom. En rapport kan komme før workeren har lagret `SENT`, siden workeren venter opptil 2 minutter
-på ACS; derfor endrer workeren bare en status som fortsatt er `RECEIVED`.
+gjennom. En rapport kan komme før workeren har lagret `SENT`; derfor endrer workeren bare en status
+som fortsatt er `RECEIVED`.
 
 ## Database
 
@@ -1272,14 +1273,14 @@ Tjenesten har en egen Postgres-database, `fint-common`, som Flais setter opp fra
 
 `message` (`V6`, statusene fra rapportene i `V7`) har én rad per akseptert melding, fra mottak til den slettes etter 60 dager:
 
-| Kolonne                            | Innhold                                                                                                                      |
-|------------------------------------|------------------------------------------------------------------------------------------------------------------------------|
-| `message_id`                       | Meldings-ID (primærnøkkel). Også `Operation-Id` mot ACS, så det trengs ingen egen operasjons-ID.                             |
-| `tenant`, `channel`, `template_id` | Enum-navn og mal-ID, til logg og metrikker. Ikke med i status-svaret.                                                        |
-| `status`                           | `RECEIVED`, `SENT`, `FAILED`, `DELIVERED`, `BOUNCED`, `SUPPRESSED` eller `FILTERED_SPAM` (CHECK, `V7`).                      |
-| `failure_reason`                   | `REJECTED`, `OPERATION_FAILED`, `RETRIES_EXHAUSTED` eller `DELIVERY_FAILED` (CHECK, `V7`). Satt bare når status er `FAILED`. |
-| `received_at`                      | Mottakstidspunktet, fra `Clock`. Gir retensjonen og alderen på køen.                                                         |
-| `updated_at`                       | Når status sist ble endret.                                                                                                  |
+| Kolonne                            | Innhold                                                                                                  |
+|------------------------------------|----------------------------------------------------------------------------------------------------------|
+| `message_id`                       | Meldings-ID (primærnøkkel). Også `Operation-Id` mot ACS, så det trengs ingen egen operasjons-ID.         |
+| `tenant`, `channel`, `template_id` | Enum-navn og mal-ID, til logg og metrikker. Ikke med i status-svaret.                                    |
+| `status`                           | `RECEIVED`, `SENT`, `FAILED`, `DELIVERED`, `BOUNCED`, `SUPPRESSED` eller `FILTERED_SPAM` (CHECK, `V7`).  |
+| `failure_reason`                   | `REJECTED`, `RETRIES_EXHAUSTED` eller `DELIVERY_FAILED` (CHECK, `V7`). Satt bare når status er `FAILED`. |
+| `received_at`                      | Mottakstidspunktet, fra `Clock`. Gir retensjonen og alderen på køen.                                     |
+| `updated_at`                       | Når status sist ble endret.                                                                              |
 
 - **Skrives** av `MessageService.receive` (INSERT før køraden), av `DispatchWorker` (sluttstatus
   i samme transaksjon som slettingen i køen, bare fra `RECEIVED`) og av `DeliveryReportProcessor`
@@ -1355,13 +1356,18 @@ deploy.
 |--------------|------------------------------------------------|-------|------------------|----------------|
 | Per mottaker | `communication.limits.recipient.per-hour`      | 10    | Siste 60 min     | Avgjort        |
 | Per mottaker | `communication.limits.recipient.per-day`       | 40    | Siste 24 t       | Avgjort        |
-| Per tenant   | `communication.limits.tenant.default.per-hour` | 100   | Siste 60 min     | Ikke bekreftet |
+| Per tenant   | `communication.limits.tenant.default.per-hour` | 40    | Siste 60 min     | Midlertidig    |
 | Per tenant   | `communication.limits.tenant.default.per-day`  | 500   | Siste 24 t       | Ikke bekreftet |
-| Totalt       | `communication.limits.total.per-hour`          | 500   | Siste 60 min     | Ikke bekreftet |
+| Totalt       | `communication.limits.total.per-hour`          | 80    | Siste 60 min     | Midlertidig    |
 | Totalt       | `communication.limits.total.per-day`           | 2000  | Siste 24 t       | Ikke bekreftet |
 
-Verdiene for tenant og totalt er foreslåtte startverdier uten trafikktall og må bekreftes med
-PO/Flais før produksjon.
+Grensene per time er holdt under ACS-kvoten på 100 e-poster per time per subscription, så tjenesten
+avviser med `429` før ACS struper. De økes når Microsoft har økt kvoten
+([FFS-2343](https://novari-iks.atlassian.net/browse/FFS-2343)). Tenantgrensen er halvparten
+av totalen, så én tenant ikke kan bruke hele kvoten. Beta bruker Azure Managed Domain (10 per time),
+og overlayet setter derfor 8 per time og 100 per døgn både per tenant og totalt. De andre verdiene er
+foreslåtte startverdier uten trafikktall og må bekreftes med PO før produksjon
+([FFS-2346](https://novari-iks.atlassian.net/browse/FFS-2346)).
 
 En tenant kan få egne grenser under `communication.limits.tenant.overrides.<TENANT>`, der nøkkelen er
 enum-navnet i `Tenant`. Tenanter uten override bruker `default`. I dag har ingen tenant override, heller
@@ -1372,11 +1378,11 @@ communication:
   limits:
     tenant:
       default:
-        per-hour: 100
+        per-hour: 40
         per-day: 500
       overrides:
         ROGALAND:
-          per-hour: 200
+          per-hour: 60
           per-day: 1000
 ```
 
@@ -1637,9 +1643,10 @@ også på hver replika; en hentet hendelse er usynlig for de andre til den er be
 | Utsending via kø-tabell i Postgres og en poller med `FOR UPDATE SKIP LOCKED`, ikke via en tråd etter commit.                                                 | Meldinger med `202` overlever restart, flere replikaer deler køen, og ACS-kallet holder ikke grenselåsene. Ingen ny infrastruktur.                              |
 | Innholdet i køen krypteres med en egen nøkkel.                                                                                                               | Adresser lagres aldri i klartekst, heller ikke de minuttene en melding venter. Egen nøkkel, siden hashing-nøkkelen har et annet formål og ikke kan roteres.     |
 | Køen er en arbeidskø; raden slettes ved `SENT` og `FAILED`.                                                                                                  | Status per melding ligger i `message`; køen holdes liten og uten innhold lenger enn nødvendig.                                                                  |
-| Vente på at ACS-operasjonen er ferdig (høyst 2 min) før meldingen regnes som sendt.                                                                          | Feil som ACS oppdager etter 202 (f.eks. undertrykt mottaker), blir synlige med en gang og ikke først med leveringsrapportene.                                   |
+| `202` fra ACS gir `SENT`; tjenesten spør aldri om status for operasjonen.                                                                                    | Statusoppslag har egen kvote hos ACS (200 per time), og SDK-et gjør minst ett per sending. Det som skjer etter `202`, kommer med leveringsrapportene.           |
 | `Operation-Id` = meldings-ID.                                                                                                                                | Nye forsøk har samme ID hos ACS, og leveringsrapportene kan knyttes til meldingen.                                                                              |
-| SDK-ets egen retry og retry i køen.                                                                                                                          | SDK-et tar korte feil på sekunder; køen tar lengre utfall over timer uten å holde en tråd.                                                                      |
+| SDK-ets egen retry og retry i køen, men SDK-et prøver ikke på nytt ved 429.                                                                                  | SDK-et tar korte feil på sekunder, køen lengre utfall. Ved 429 venter køen på `Retry-After`, siden ACS teller avviste forespørsler mot kvoten.                  |
+| Grensene per time er holdt under ACS-kvoten.                                                                                                                 | Konsumenten får `429` med `Retry-After` fra tjenesten i stedet for at meldinger blir liggende i køen og kanskje feiler med `retries-exhausted`.                 |
 | 401 og 403 fra ACS regnes som forbigående.                                                                                                                   | Skyldes konfig (nøkkel), ikke meldingen; meldingene sendes når nøkkelen er rettet innen forsøkene er brukt opp.                                                 |
 | Leverandøren `logging` er default.                                                                                                                           | Tjenesten starter og kan testes lokalt, i tester og i beta uten ACS.                                                                                            |
 | Connection string fra 1Password, ikke workload identity.                                                                                                     | Som Jira-oppgaven og FFS-1965; workload identity krever federert identitet i AKS og flere avhengigheter.                                                        |

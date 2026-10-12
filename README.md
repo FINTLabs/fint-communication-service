@@ -114,12 +114,11 @@ gjentar aldri verdiene som ble sendt inn.
 | `FILTERED_SPAM` | Mottakerens server avviste meldingen som spam eller satte den i karantene.                                                     |
 | `FAILED`        | Meldingen ble ikke sendt eller ikke levert, og tjenesten prøver ikke igjen. `failureReason` sier hvorfor.                      |
 
-| `failureReason`     | Betyr                                                                                              | Nytt forsøk                |
-|---------------------|----------------------------------------------------------------------------------------------------|----------------------------|
-| `REJECTED`          | ACS avviste forespørselen (4xx).                                                                   | Hjelper ikke uten endring. |
-| `OPERATION_FAILED`  | ACS tok imot forespørselen, men operasjonen feilet, f.eks. fordi mottakeren er undertrykt hos ACS. | Hjelper ikke uten endring. |
-| `RETRIES_EXHAUSTED` | Forbigående feil i alle 8 forsøkene (ca. 2 timer).                                                 | Kan sendes på nytt senere. |
-| `DELIVERY_FAILED`   | ACS sendte meldingen, men leveringsrapporten sier at den ikke ble levert.                          | Kan sendes på nytt senere. |
+| `failureReason`     | Betyr                                                                     | Nytt forsøk                |
+|---------------------|---------------------------------------------------------------------------|----------------------------|
+| `REJECTED`          | ACS avviste forespørselen (4xx).                                          | Hjelper ikke uten endring. |
+| `RETRIES_EXHAUSTED` | Forbigående feil i alle 8 forsøkene (ca. 2 timer).                        | Kan sendes på nytt senere. |
+| `DELIVERY_FAILED`   | ACS sendte meldingen, men leveringsrapporten sier at den ikke ble levert. | Kan sendes på nytt senere. |
 
 `failureReason` er `null` når status ikke er `FAILED`. `updatedAt` er når status sist ble endret.
 Svaret har aldri mottaker, mal, emne eller innhold, og det er ingen tenant-sjekk. Ukjent ID, eller en
@@ -137,16 +136,20 @@ spam fra Novari, uansett hvilken tenant eller applikasjon som sender. Grensene p
 skal i tillegg stoppe en kompromittert eller feilkonfigurert avsender og holde kostnaden under
 kontroll.
 
-| Grense       | `limit`    | Verdi | Vindu             | Status          |
-|--------------|------------|-------|-------------------|-----------------|
-| Per mottaker | `mottaker` | 10    | Siste 60 minutter | Avgjort         |
-| Per mottaker | `mottaker` | 40    | Siste 24 timer    | Avgjort         |
-| Per tenant   | `tenant`   | 100   | Siste 60 minutter | Ikke bekreftet* |
-| Per tenant   | `tenant`   | 500   | Siste 24 timer    | Ikke bekreftet* |
-| Totalt       | `total`    | 500   | Siste 60 minutter | Ikke bekreftet* |
-| Totalt       | `total`    | 2000  | Siste 24 timer    | Ikke bekreftet* |
+| Grense       | `limit`    | Verdi | Vindu             | Status         |
+|--------------|------------|-------|-------------------|----------------|
+| Per mottaker | `mottaker` | 10    | Siste 60 minutter | Avgjort        |
+| Per mottaker | `mottaker` | 40    | Siste 24 timer    | Avgjort        |
+| Per tenant   | `tenant`   | 40    | Siste 60 minutter | Midlertidig*   |
+| Per tenant   | `tenant`   | 500   | Siste 24 timer    | Ikke bekreftet |
+| Totalt       | `total`    | 80    | Siste 60 minutter | Midlertidig*   |
+| Totalt       | `total`    | 2000  | Siste 24 timer    | Ikke bekreftet |
 
-\* Foreslåtte startverdier uten trafikktall. De må bekreftes med PO/Flais før produksjon.
+\* Holdt under ACS-kvoten, som er 100 e-poster per time per subscription til Microsoft har økt den
+(se [Kvote i ACS](#kvote-i-acs) og [FFS-2343](https://novari-iks.atlassian.net/browse/FFS-2343)).
+Beta bruker Azure Managed Domain med 10 per time, og har derfor 8 per time og 100 per døgn både per
+tenant og totalt (overlayet). De andre verdiene er foreslåtte startverdier uten trafikktall og må
+bekreftes med PO før produksjon ([FFS-2346](https://novari-iks.atlassian.net/browse/FFS-2346)).
 
 - Mottakeren er adressen etter `trim` og små bokstaver, felles for alle tenants. `ola+test@rogfk.no`
   er en annen mottaker enn `ola@rogfk.no`.
@@ -173,14 +176,14 @@ communication:
       per-day: 40
     tenant:
       default:
-        per-hour: 100
+        per-hour: 40
         per-day: 500
       overrides:
         ROGALAND:
-          per-hour: 200
+          per-hour: 60
           per-day: 1000
     total:
-      per-hour: 500
+      per-hour: 80
       per-day: 2000
 ```
 
@@ -335,21 +338,44 @@ som er klare, hvert andre sekund, og sender dem via `EmailAdapter`. Flere pods d
 sende samme melding to ganger, og en melding som var under sending da en pod stoppet, sendes på
 nytt etter 5 minutter.
 
-| Utfall                                                                             | Hva skjer                                                                                                                                                                    |
-|------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Sendt (ACS har bekreftet operasjonen)                                              | Raden i køen slettes, og status blir `SENT`. `communication_message_sent_total` øker.                                                                                        |
-| Forbigående feil (nettverk, 408, 429, 5xx, 401/403, ingen sluttstatus innen 2 min) | Nytt forsøk etter 1, 2, 4 … minutter (høyst 1 time mellom forsøkene; `Retry-After` fra ACS respekteres), høyst 8 forsøk.                                                     |
-| Permanent feil (andre 4xx, operasjonen feilet hos ACS)                             | Raden i køen slettes, og status blir `FAILED` med `REJECTED` eller `OPERATION_FAILED`. `communication_message_failed_total` øker, og en WARN-logg har årsak og ACS-feilkode. |
-| Forsøkene brukt opp                                                                | Som permanent feil, med årsak `RETRIES_EXHAUSTED` (`retries-exhausted` i metrikker og logg).                                                                                 |
+| Utfall                                              | Hva skjer                                                                                                                                           |
+|-----------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
+| Sendt (ACS har svart `202`)                         | Raden i køen slettes, og status blir `SENT`. `communication_message_sent_total` øker.                                                               |
+| Forbigående feil (nettverk, 408, 429, 5xx, 401/403) | Nytt forsøk etter 1, 2, 4 … minutter (høyst 1 time mellom forsøkene; `Retry-After` fra ACS respekteres), høyst 8 forsøk.                            |
+| Permanent feil (andre 4xx)                          | Raden i køen slettes, og status blir `FAILED` med `REJECTED`. `communication_message_failed_total` øker, og en WARN-logg har årsak og ACS-feilkode. |
+| Forsøkene brukt opp                                 | Som permanent feil, med årsak `RETRIES_EXHAUSTED` (`retries-exhausted` i metrikker og logg).                                                        |
 
-Status og tidspunkter ligger i tabellen `message` i 60 dager etter mottak, uten adresse og innhold,
-og kan slås opp med `GET /api/v1/messages/{id}` (se [Status for en melding](#status-for-en-melding)).
+Tjenesten venter ikke på at ACS har behandlet sendingen, og spør aldri ACS om status. Hva som skjedde
+etterpå (levert, bounce, undertrykt mottaker, spam), kommer med leveringsrapportene (se
+[Leveringsrapporter](#leveringsrapporter)). Status og tidspunkter ligger i tabellen `message` i 60
+dager etter mottak, uten adresse og innhold, og kan slås opp med `GET /api/v1/messages/{id}` (se
+[Status for en melding](#status-for-en-melding)).
+
 Leverandøren velges med `communication.email.provider`:
 
 | Verdi     | Adapter               | Bruk                                                                                                         |
 |-----------|-----------------------|--------------------------------------------------------------------------------------------------------------|
 | `logging` | `LoggingEmailAdapter` | Default. Logger meldings-ID og mal og regner meldingen som sendt. Lokalt, i tester og i beta til ACS finnes. |
 | `acs`     | `AcsEmailAdapter`     | Sender via Azure Communication Services. Krever connection string og avsenderadresse.                        |
+
+### Kvote i ACS
+
+ACS har en kvote per Azure-subscription, ikke per ressurs. Den deles derfor av alle e-postressurser i
+samme subscription:
+
+| Domene        | Sendinger per minutt | Sendinger per time | Kan økes |
+|---------------|----------------------|--------------------|----------|
+| Eget domene   | 30                   | 100                | Ja       |
+| Azure Managed | 5                    | 10                 | Nei      |
+
+- Grensene i tjenesten er satt under kvoten (se [Grenser](#grenser)), så en konsument får `429` fra
+  tjenesten før ACS struper.
+- Struper ACS likevel, prøver SDK-et ikke på nytt selv. ACS teller også avviste forespørsler, så
+  hyppige forsøk forlenger strupingen. Meldingen blir liggende i køen og sendes etter `Retry-After`.
+- Statusoppslag har en egen kvote (200 per time). Tjenesten bruker ikke statusoppslag.
+- Kvoten kan bare økes for eget domene, etter søknad til Microsoft. Domenet må ha vært i bruk en
+  stund, og feilraten må være lav. Egne avsenderadresser (f.eks. `no-reply@`) kan først legges til
+  etter økningen; til da er avsenderen `DoNotReply@<domene>`.
 
 ## Leveringsrapporter
 
@@ -421,7 +447,6 @@ Loggen er JSON, også lokalt og i testene. Lesbar tekst får man med et tomt for
 | `communication.email.provider`                                                                                        | `logging` (default) eller `acs`. Ukjent verdi stopper oppstarten.                                                                   |
 | `communication.email.sender`                                                                                          | Avsenderadressen. Påkrevd med `acs`, og må være verifisert i ACS.                                                                   |
 | `COMMUNICATION_EMAIL_ACS_CONNECTION_STRING`                                                                           | Connection string til ACS-ressursen. Fra 1Password. Påkrevd med `acs`.                                                              |
-| `communication.email.acs.operation-timeout`                                                                           | Hvor lenge det ventes på at ACS bekrefter en sending. `2m` i `application.yaml`.                                                    |
 | `communication.email.delivery-reports.enabled`                                                                        | Mottak av leveringsrapporter. `false` (default).                                                                                    |
 | `COMMUNICATION_EMAIL_DELIVERY_REPORTS_CONNECTION_STRING`                                                              | Connection string til Storage-kontoen med køen. Fra 1Password. Påkrevd når mottaket er slått på.                                    |
 | `communication.email.delivery-reports.queue-name`                                                                     | Køen Event Grid skriver til (`email-delivery-reports`).                                                                             |
@@ -575,7 +600,8 @@ bruk `max` og ikke `sum` på tvers av pods.
 viser utnyttelse, avvisninger, aksepterte, sendte og feilede meldinger per tenant, utsendingskøen,
 leveringsrapporter per status, bounce-rate og rapportkøen. Det importeres manuelt i Grafana
 (Dashboards → New → Import → last opp filen, og velg Prometheus-datakilden). Endringer gjøres i Grafana,
-eksporteres som JSON og legges inn i repoet med PR.
+eksporteres som JSON og legges inn i repoet med PR. Importen i beta og api gjøres i
+[FFS-2344](https://novari-iks.atlassian.net/browse/FFS-2344).
 
 **Varsling.** Varselreglene og hva vakthavende gjør, står i [runbooken](docs/runbook.md):
 
@@ -590,7 +616,8 @@ eksporteres som JSON og legges inn i repoet med PR.
 - over 1000 rapporter i rapportkøen i 15 minutter,
 - feil mot rapportkøen i 15 minutter.
 
-Reglene registreres manuelt i Grafana Alerts med uttrykkene, tersklene og varighetene i runbooken.
+Reglene registreres manuelt i Grafana Alerts med uttrykkene, tersklene og varighetene i runbooken
+([FFS-2345](https://novari-iks.atlassian.net/browse/FFS-2345)).
 
 ## Deploy
 
@@ -623,8 +650,11 @@ Når ACS-ressursen, domenet og avsenderadressen finnes (FFS-1965):
      path: "/spec/env/-"
      value:
        name: "communication.email.sender"
-       value: "no-reply@<verifisert domene>"
+       value: "DoNotReply@<verifisert domene>"
    ```
+
+   Bruk adressen nøyaktig slik den står under MailFrom-adressene i Azure-portalen. Med standardkvoten
+   er `DoNotReply` den eneste avsenderen (se [Kvote i ACS](#kvote-i-acs)).
 
 3. Følg [Verifisere utsending](docs/runbook.md#verifisere-utsending) i runbooken.
 

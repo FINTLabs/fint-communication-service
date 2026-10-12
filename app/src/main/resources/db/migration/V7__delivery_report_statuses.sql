@@ -4,4 +4,4 @@ ALTER TABLE message
         CHECK (status IN ('RECEIVED', 'SENT', 'FAILED', 'DELIVERED', 'BOUNCED', 'SUPPRESSED', 'FILTERED_SPAM')),
     DROP CONSTRAINT message_failure_reason,
     ADD CONSTRAINT message_failure_reason
-        CHECK (failure_reason IN ('REJECTED', 'OPERATION_FAILED', 'RETRIES_EXHAUSTED', 'DELIVERY_FAILED'));
+        CHECK (failure_reason IN ('REJECTED', 'RETRIES_EXHAUSTED', 'DELIVERY_FAILED'));

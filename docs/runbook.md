@@ -39,7 +39,7 @@ blokkeringslisten er beskrevet i [README](../README.md#grenser) og
 | `communication_limit_total_usage_ratio`           | Gauge   | `window` (`hour`, `day`)                                                                                                | Forbruk delt på totalgrensen i glidende vindu.                   |
 | `communication_message_sent_total`                | Counter | `tenant`, `channel`                                                                                                     | Meldinger sendt til leverandøren.                                |
 | `communication_message_retried_total`             | Counter | `tenant`, `channel`, `reason` (`timeout`, `throttled`, `server-error`, `unauthorized`, `io`, `unexpected`)              | Forbigående feil; meldingen prøves igjen.                        |
-| `communication_message_failed_total`              | Counter | `tenant`, `channel`, `reason` (`rejected`, `operation-failed`, `retries-exhausted`)                                     | Meldinger som ikke ble sendt.                                    |
+| `communication_message_failed_total`              | Counter | `tenant`, `channel`, `reason` (`rejected`, `retries-exhausted`)                                                         | Meldinger som ikke ble sendt.                                    |
 | `communication_dispatch_queue_size`               | Gauge   | –                                                                                                                       | Meldinger i køen (ikke sendt eller feilet ennå).                 |
 | `communication_dispatch_queue_oldest_seconds`     | Gauge   | –                                                                                                                       | Alderen på den eldste meldingen i køen.                          |
 | `communication_delivery_report_received_total`    | Counter | `tenant`, `channel`, `template`, `status` (`DELIVERED`, `BOUNCED`, `SUPPRESSED`, `FILTERED_SPAM`, `FAILED`, `EXPANDED`) | Leveringsrapporter for kjente meldinger, per status i rapporten. |
@@ -185,7 +185,6 @@ forsøk, årsak og detalj (HTTP-status og ACS-feilkode), aldri adresse eller inn
 | `reason`            | Betyr                                                                                     | Gjør                                                                                                                      |
 |---------------------|-------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------|
 | `rejected`          | ACS avviste requesten (4xx), f.eks. ugyldig avsender eller domene som ikke er verifisert. | Gjelder det alle meldinger, er det konfig: sjekk `communication.email.sender` mot avsenderen i ACS. Ellers: se feilkoden. |
-| `operation-failed`  | ACS godtok requesten, men sendingen feilet, f.eks. `EmailDroppedAllRecipientsSuppressed`. | Mottakeren er undertrykt hos ACS (bounce eller avmelding). Kontakt teamet som eier konsumenten hvis det gjelder mange.    |
 | `retries-exhausted` | Alle forsøk (8, over ca. 2 timer) ga forbigående feil.                                    | Se [Køen står](#køen-står): ACS har trolig vært utilgjengelig, strupet trafikken eller avvist nøkkelen over lengre tid.   |
 
 Meldinger som har feilet, må sendes på nytt av konsumenten. Kontakt teamet som eier konsumenten med
@@ -200,7 +199,9 @@ i det hele tatt.
 
 - `communication_message_retried_total` per `reason` viser hvorfor sendingen feiler:
   - `server-error`, `timeout` eller `io`: ACS er utilgjengelig eller treg.
-  - `throttled`: ACS struper trafikken. Køen tømmes av seg selv når ACS slipper til igjen.
+  - `throttled`: ACS struper trafikken. Køen tømmes av seg selv når ACS slipper til igjen. Kvoten er
+    per subscription, så sjekk om andre ressurser i samme subscription sender e-post, og at grensene
+    i tjenesten er under kvoten (se [README](../README.md#kvote-i-acs)).
   - `unauthorized`: connection string er feil eller rotert. Sjekk
     `COMMUNICATION_EMAIL_ACS_CONNECTION_STRING` i 1Password-itemet og restart podden.
   - `unexpected` med `detalj=javax.crypto.AEADBadTagException`: meldingen kan ikke dekrypteres, fordi

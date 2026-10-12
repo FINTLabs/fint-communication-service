@@ -27,7 +27,7 @@ class EmailConfiguration {
             } catch (_: IllegalArgumentException) {
                 throw IllegalStateException("$CONNECTION_STRING_DESCRIPTION er ugyldig")
             }
-        return AcsEmailAdapter(client, sender, properties.acs.operationTimeout)
+        return AcsEmailAdapter(client, sender)
     }
 
     companion object {

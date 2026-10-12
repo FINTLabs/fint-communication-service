@@ -22,10 +22,7 @@ class AcsEmailAdapterTest {
             replyTo = "no-reply@novari.no",
         )
 
-    private fun adapter(
-        sdkRetries: Int = 0,
-        operationTimeout: Duration = Duration.ofSeconds(10),
-    ) = AcsEmailAdapter(acs.client(sdkRetries), SENDER, operationTimeout)
+    private fun adapter(sdkRetries: Int = 0) = AcsEmailAdapter(acs.client(sdkRetries), SENDER)
 
     @Test
     fun `maps the email to the ACS send request`() {
@@ -59,7 +56,7 @@ class AcsEmailAdapterTest {
     }
 
     @Test
-    fun `sends the message id as operation id on the send request only`() {
+    fun `sends the message id as operation id`() {
         adapter().send(id, email)
 
         assertThat(
@@ -68,9 +65,6 @@ class AcsEmailAdapterTest {
                 .headers
                 .getValue(OperationIdPolicy.OPERATION_ID_HEADER),
         ).isEqualTo(id.value.toString())
-        assertThat(acs.requests.filter { it.method == HttpMethod.GET })
-            .isNotEmpty()
-            .allSatisfy { assertThat(it.headers.getValue(OperationIdPolicy.OPERATION_ID_HEADER)).isNull() }
     }
 
     @Test
@@ -84,34 +78,25 @@ class AcsEmailAdapterTest {
     }
 
     @Test
-    fun `waits for the operation to complete`() {
-        acs.onPoll(FakeAcs.status("Running"), FakeAcs.status("Succeeded"))
-
+    fun `an accepted send is sent without asking ACS for the operation status`() {
         assertThat(adapter().send(id, email)).isEqualTo(EmailSendOutcome.Sent)
-        assertThat(acs.requests.count { it.method == HttpMethod.GET }).isEqualTo(2)
+
+        assertThat(acs.requests).singleElement().extracting { it.method }.isEqualTo(HttpMethod.POST)
     }
 
     @Test
-    fun `a failed operation is permanent with the error code but not the message`() {
-        acs.onPoll(FakeAcs.status("Failed", "EmailDroppedAllRecipientsSuppressed", "ola.nordmann@rogfk.no"))
+    fun `the sdk does not retry throttling`() {
+        acs.onSend(
+            FakeAcs.error(429, "TooManyRequests", headers = mapOf("Retry-After" to "120")),
+            FakeAcs.accepted(),
+        )
 
-        val outcome = adapter().send(id, email)
-
-        assertThat(outcome).isInstanceOfSatisfying(EmailSendOutcome.Permanent::class.java) {
-            assertThat(it.reason).isEqualTo(FailureReason.OPERATION_FAILED)
-            assertThat(it.detail).contains("EmailDroppedAllRecipientsSuppressed").doesNotContain("ola.nordmann")
-        }
-    }
-
-    @Test
-    fun `an operation that does not complete in time is retryable`() {
-        acs.onPoll(*Array(10) { FakeAcs.status("Running") })
-
-        val outcome = adapter(operationTimeout = Duration.ofMillis(1500)).send(id, email)
+        val outcome = adapter(sdkRetries = 3).send(id, email)
 
         assertThat(outcome).isInstanceOfSatisfying(EmailSendOutcome.Retryable::class.java) {
-            assertThat(it.reason).isEqualTo(RetryReason.TIMEOUT)
+            assertThat(it.reason).isEqualTo(RetryReason.THROTTLED)
         }
+        assertThat(acs.sendRequests).hasSize(1)
     }
 
     @Test
