@@ -4,4 +4,5 @@ enum class FailureReason {
     REJECTED,
     OPERATION_FAILED,
     RETRIES_EXHAUSTED,
+    DELIVERY_FAILED,
 }

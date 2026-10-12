@@ -79,6 +79,7 @@ class DispatchWorker(
         message: QueuedMessage,
         outcome: EmailSendOutcome.Retryable,
     ) {
+        if (alreadyReported(message)) return reported(message, outcome)
         if (message.attempts >= properties.maxAttempts) {
             return failed(message, FailureReason.RETRIES_EXHAUSTED, "${outcome.reason.value} ${outcome.detail}")
         }
@@ -91,6 +92,21 @@ class DispatchWorker(
                 MessageStatus.RECEIVED,
             )} årsak=${outcome.reason.value} " +
                 "detalj=${outcome.detail}"
+        }
+    }
+
+    private fun alreadyReported(message: QueuedMessage): Boolean =
+        messageStore.find(message.id)?.status?.let { it != MessageStatus.RECEIVED } == true
+
+    private fun reported(
+        message: QueuedMessage,
+        outcome: EmailSendOutcome.Retryable,
+    ) {
+        if (transactions.execute { repository.delete(message) } != true) return logLeaseLost(message)
+        metrics.sent(message)
+        log.info {
+            "Melding sendt ifølge leveringsrapport, prøver ikke igjen ${describe(message)} " +
+                "årsak=${outcome.reason.value} detalj=${outcome.detail}"
         }
     }
 

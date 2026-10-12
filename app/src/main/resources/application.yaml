@@ -46,6 +46,15 @@ communication:
     provider: logging
     acs:
       operation-timeout: 2m
+    delivery-reports:
+      enabled: false
+      queue-name: email-delivery-reports
+      poll-interval: 10s
+      batch-size: 32
+      visibility-timeout: 5m
+      max-dequeue-count: 5
+      queue-metrics-refresh: 60s
+      block-for: 30d
   dispatch:
     poll-interval: 2s
     batch-size: 10

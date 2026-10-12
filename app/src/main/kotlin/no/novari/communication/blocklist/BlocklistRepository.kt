@@ -28,6 +28,26 @@ class BlocklistRepository(
             .query(Boolean::class.java)
             .single()
 
+    fun blockHardBounce(
+        recipient: RecipientHash,
+        source: BlockSource,
+        expiresAt: Instant,
+    ) {
+        jdbcClient
+            .sql(
+                """
+                INSERT INTO recipient_blocklist (recipient_hash, reason, source, expires_at)
+                VALUES (:recipientHash, :reason, :source, :expiresAt)
+                ON CONFLICT (recipient_hash, reason)
+                    DO UPDATE SET expires_at = GREATEST(recipient_blocklist.expires_at, EXCLUDED.expires_at)
+                """.trimIndent(),
+            ).param("recipientHash", recipient.value)
+            .param("reason", BlockReason.HARD_BOUNCE.name)
+            .param("source", source.name)
+            .param("expiresAt", expiresAt.toOffsetDateTime())
+            .update()
+    }
+
     fun deleteExpired(now: Instant): Int =
         jdbcClient
             .sql("DELETE FROM recipient_blocklist WHERE expires_at <= :now")
