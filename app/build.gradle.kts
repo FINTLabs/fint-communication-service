@@ -1,16 +1,12 @@
 plugins {
     id("kotlin-conventions")
     id("org.springframework.boot")
-    id("io.spring.dependency-management")
     kotlin("plugin.spring")
 }
 
 tasks.jar {
     isEnabled = false
 }
-
-extra["tomcat.version"] = "11.0.26"
-extra["jackson-bom.version"] = "3.1.7"
 
 springBoot {
     mainClass.set("no.novari.communication.ApplicationKt")
@@ -26,6 +22,14 @@ sourceSets {
 }
 
 dependencies {
+    implementation(platform(libs.spring.boot.dependencies))
+    implementation(platform(libs.jackson3.bom))
+    constraints {
+        implementation(libs.tomcat.embed.core)
+        implementation(libs.tomcat.embed.el)
+        implementation(libs.tomcat.embed.websocket)
+    }
+
     implementation(project(":model"))
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
@@ -36,7 +40,7 @@ dependencies {
     implementation("tools.jackson.module:jackson-module-kotlin")
     implementation("tools.jackson.dataformat:jackson-dataformat-yaml")
     implementation("com.samskivert:jmustache")
-    implementation("io.github.oshai:kotlin-logging-jvm:8.0.4")
+    implementation(libs.kotlin.logging)
 
     testImplementation("org.springframework.boot:spring-boot-starter-actuator-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")

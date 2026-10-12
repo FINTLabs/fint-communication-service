@@ -7,19 +7,18 @@ repositories {
 }
 
 dependencies {
-    implementation("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.21")
-    implementation("org.jetbrains.kotlin:kotlin-allopen:2.4.21")
-    implementation("org.jlleitschuh.gradle:ktlint-gradle:14.2.0")
-    implementation("org.springframework.boot:spring-boot-gradle-plugin:4.1.1")
-    implementation("io.spring.gradle:dependency-management-plugin:1.1.7")
-    implementation("io.github.ben-manes.versions:io.github.ben-manes.versions.gradle.plugin:0.64.0")
+    implementation(libs.kotlin.gradle.plugin)
+    implementation(libs.kotlin.allopen)
+    implementation(libs.ktlint.gradle.plugin)
+    implementation(libs.spring.boot.gradle.plugin)
+    implementation(libs.ben.manes.versions.plugin)
 
     constraints {
-        implementation("org.apache.httpcomponents.client5:httpclient5:5.6.5")
-        implementation("org.apache.httpcomponents.core5:httpcore5:5.4.4")
-        implementation("org.apache.httpcomponents.core5:httpcore5-h2:5.4.4")
-        implementation("org.apache.commons:commons-lang3:3.21.0")
-        implementation("tools.jackson.core:jackson-core:3.2.3")
-        implementation("tools.jackson.core:jackson-databind:3.2.3")
+        implementation(libs.httpclient5)
+        implementation(libs.httpcore5)
+        implementation(libs.httpcore5.h2)
+        implementation(libs.commons.lang3)
+        implementation(libs.jackson3.core)
+        implementation(libs.jackson3.databind)
     }
 }

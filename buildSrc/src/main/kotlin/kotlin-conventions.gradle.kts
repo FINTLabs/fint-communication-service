@@ -3,6 +3,10 @@ plugins {
     id("org.jlleitschuh.gradle.ktlint")
 }
 
+private val libs = versionCatalogs.named("libs")
+
+private fun version(alias: String) = libs.findVersion(alias).get().requiredVersion
+
 group = "no.novari"
 version = providers.gradleProperty("version").getOrElse("1.0-SNAPSHOT")
 
@@ -15,18 +19,18 @@ kotlin {
 }
 
 ktlint {
-    version.set("1.8.0")
+    version.set(version("ktlint-cli"))
 }
 
-// ktlint 1.8.0 embeds the Kotlin 2.2 compiler and breaks when the Kotlin Gradle plugin aligns it to a newer version.
+// ktlint embeds the Kotlin 2.2 compiler and breaks when the Kotlin Gradle plugin aligns it to a newer version.
 afterEvaluate {
     configurations.matching { it.name.startsWith("ktlint") }.configureEach {
         resolutionStrategy.eachDependency {
             if (requested.group == "org.jetbrains.kotlin") {
-                useVersion("2.2.21")
+                useVersion(version("ktlint-kotlin"))
             }
             if (requested.group == "ch.qos.logback") {
-                useVersion("1.5.38")
+                useVersion(version("logback"))
             }
         }
     }
