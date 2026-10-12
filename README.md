@@ -138,6 +138,10 @@ communication:
 
 Ingen tenant har override i dag. NOVARI (test) bruker også `default`.
 
+Avvisningene telles per grensetype og tenant, og utnyttelsen av tenant- og totalgrensen publiseres som
+metrikker. Varsel går når en grense er over 80 % utnyttet eller avviser meldinger; se
+[Drift og varsling](#drift-og-varsling).
+
 ```json
 HTTP/1.1 429
 Retry-After: 3000
@@ -167,6 +171,8 @@ tjenesten. Listen er felles for alle tenants og sjekkes ved innsending, før gre
 - Listen lagrer bare HMAC-hashen av adressen, aldri adressen.
 - En utløpt blokkering gjelder ikke lenger og slettes av den nattlige opprydningen.
 - Er databasen utilgjengelig, avvises meldingen med `503` (fail-closed).
+- Avvisningene telles per tenant (`communication_blocklist_rejected_total`). Mange avvisninger fra
+  samme tenant tyder på en konsument som ikke håndterer `422`; se [Drift og varsling](#drift-og-varsling).
 
 ```json
 HTTP/1.1 422
@@ -306,6 +312,7 @@ Loggen er JSON, også lokalt og i testene. Lesbar tekst får man med et tomt for
 | `communication.limits.tenant.default.per-hour`, `communication.limits.tenant.default.per-day` | Grenser per tenant (100 og 500, ikke bekreftet) i `application.yaml`.                                |
 | `communication.limits.tenant.overrides.<TENANT>.per-hour`, `...per-day`                       | Valgfri override per tenant. Nøkkelen er enum-navnet i `Tenant`, og begge feltene må settes.         |
 | `communication.limits.total.per-hour`, `communication.limits.total.per-day`                   | Grenser for alle tenants samlet (500 og 2000, ikke bekreftet) i `application.yaml`.                  |
+| `communication.limits.usage-refresh`                                                          | Hvor ofte utnyttelsen av grensene regnes ut fra databasen. `60s` i `application.yaml`.               |
 | `logging.structured.format.console`                                                           | Loggformat. `logstash` (JSON til stdout) i `application.yaml`.                                       |
 | `logging.level.<pakke>` (eller `LOGGING_LEVEL_<PAKKE>`)                                       | Log-nivå per pakke, f.eks. `logging.level.no.novari.communication=DEBUG`. Default `INFO`.            |
 
@@ -392,6 +399,36 @@ tjenesten er midlertidig utilgjengelig og kan prøves på nytt senere.
 
 Opprett en GitHub-release med tag `vX.Y.Z`. `Publish to Reposilite`-workflowen publiserer da
 `model` og `client` med versjon `X.Y.Z`.
+
+## Drift og varsling
+
+Tjenesten publiserer disse metrikkene på `/actuator/prometheus`, i tillegg til Spring Boots egne. Ingen
+av dem har adresse eller hash som tag.
+
+| Metrikk                                  | Tagger                                            | Betydning                                                |
+|------------------------------------------|---------------------------------------------------|----------------------------------------------------------|
+| `communication_message_accepted_total`   | `tenant`, `channel`                               | Aksepterte meldinger (`202`).                            |
+| `communication_limit_rejected_total`     | `limit` (`mottaker`, `tenant`, `total`), `tenant` | Meldinger avvist av en grense (`429`).                   |
+| `communication_blocklist_rejected_total` | `tenant`                                          | Meldinger avvist fordi mottakeren er blokkert (`422`).   |
+| `communication_limit_tenant_usage_ratio` | `tenant`, `window` (`hour`, `day`)                | Forbruk delt på tenantgrensen, siste time og siste døgn. |
+| `communication_limit_total_usage_ratio`  | `window` (`hour`, `day`)                          | Forbruk delt på totalgrensen, siste time og siste døgn.  |
+
+Utnyttelsen regnes ut fra databasen hvert minutt og er lik på alle replikaer, så bruk `max` og ikke
+`sum` på tvers av pods.
+
+**Dashboard.** [`grafana/fint-communication-service.json`](grafana/fint-communication-service.json)
+viser utnyttelse, avvisninger og aksepterte meldinger per tenant. Det importeres manuelt i Grafana
+(Dashboards → New → Import → last opp filen, og velg Prometheus-datakilden). Endringer gjøres i Grafana,
+eksporteres som JSON og legges inn i repoet med PR.
+
+**Varsling.** Varselreglene og hva vakthavende gjør, står i [runbooken](docs/runbook.md):
+
+- utnyttelse av en tenant- eller totalgrense over 80 %,
+- alle avvisninger på tenant- og totalgrensen,
+- over 10 avvisninger på mottakergrensen per tenant per time,
+- over 10 blokkerte innsendinger per tenant per time.
+
+Reglene registreres manuelt i Grafana Alerts med uttrykkene, tersklene og varighetene i runbooken.
 
 ## Deploy
 
