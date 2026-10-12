@@ -30,6 +30,7 @@ dependencies {
     testImplementation("org.springframework:spring-webflux")
     testImplementation("io.projectreactor:reactor-core")
     testImplementation("com.fasterxml.jackson.module:jackson-module-kotlin")
+    testImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
     testImplementation("org.skyscreamer:jsonassert")
     testImplementation(kotlin("test-junit5"))
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

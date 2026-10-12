@@ -17,9 +17,10 @@ blokkeringslisten er beskrevet i [README](../README.md#grenser) og
 8. [Mange blokkerte innsendinger](#mange-blokkerte-innsendinger)
 9. [Meldinger feilet](#meldinger-feilet)
 10. [Køen står](#køen-står)
-11. [Justere grenser](#justere-grenser)
-12. [Testvarsel](#testvarsel)
-13. [Verifisere utsending](#verifisere-utsending)
+11. [Slå opp en melding](#slå-opp-en-melding)
+12. [Justere grenser](#justere-grenser)
+13. [Testvarsel](#testvarsel)
+14. [Verifisere utsending](#verifisere-utsending)
 
 ## Metrikker
 
@@ -157,7 +158,8 @@ eller en mottakerliste har mange døde adresser.
 ## Meldinger feilet
 
 **Betyr:** en eller flere meldinger som fikk `202`, ble ikke sendt. Raden i køen er slettet, og
-meldingen sendes ikke på nytt av seg selv. Konsumenten får ikke vite det.
+meldingen sendes ikke på nytt av seg selv. Status er `FAILED` med årsak, og konsumenten ser det med
+`GET /api/v1/messages/{id}` (se [Slå opp en melding](#slå-opp-en-melding)).
 
 **Finn årsaken:** søk i Loki etter `Melding feilet`. Linjen har meldings-ID, tenant, mal, antall
 forsøk, årsak og detalj (HTTP-status og ACS-feilkode), aldri adresse eller innhold.
@@ -193,11 +195,31 @@ i det hele tatt.
 - Status i køen direkte i `fint-common`:
 
   ```sql
-  SELECT status, attempts, count(*), min(received_at), min(next_attempt_at)
-  FROM dispatch_queue
-  GROUP BY status, attempts
+  SELECT locked_until IS NOT NULL AS reservert, attempts, count(*), min(m.received_at), min(next_attempt_at)
+  FROM dispatch_queue JOIN message m USING (message_id)
+  GROUP BY reservert, attempts
   ORDER BY attempts;
   ```
+
+## Slå opp en melding
+
+Status for én melding, f.eks. når en konsument spør om en meldings-ID:
+
+```bash
+kubectl -n fintlabs-no port-forward deploy/fint-communication-service 8080:8080
+curl -s localhost:8080/api/v1/messages/<meldings-ID>
+```
+
+Eller direkte i `fint-common`, med forsøk og neste forsøk hvis meldingen fortsatt ligger i køen:
+
+```sql
+SELECT m.status, m.failure_reason, m.received_at, m.updated_at, q.attempts, q.next_attempt_at
+FROM message m LEFT JOIN dispatch_queue q USING (message_id)
+WHERE m.message_id = '<meldings-ID>';
+```
+
+`404` eller ingen rad betyr at ID-en er ukjent, eller at meldingen ble mottatt for mer enn 60 dager
+siden og er slettet. Mer om hva som skjedde, finnes i Loki (søk på ID-en).
 
 ## Justere grenser
 
@@ -266,6 +288,7 @@ Forutsetter at ACS er slått på i miljøet (se [README](../README.md#slå-på-a
 
 3. Bekreft:
    - svaret er `202` med en meldings-ID,
+   - `curl -s localhost:8080/api/v1/messages/<meldings-ID>` gir `"status":"SENT"`,
    - loggen har `Melding mottatt` og `Melding sendt` med samme ID, og `status=SENT`,
    - `communication_message_sent_total{tenant="NOVARI"}` har økt,
    - e-posten har kommet fram, med avsender fra `communication.email.sender` og svaradresse

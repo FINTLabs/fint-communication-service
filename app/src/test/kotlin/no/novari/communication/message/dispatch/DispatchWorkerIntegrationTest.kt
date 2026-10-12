@@ -5,12 +5,15 @@ import no.novari.communication.ControllableEmailAdapter
 import no.novari.communication.IntegrationTest
 import no.novari.communication.MutableClock
 import no.novari.communication.email.EmailSendOutcome
-import no.novari.communication.email.FailureReason
 import no.novari.communication.email.RetryReason
+import no.novari.communication.email.value
 import no.novari.communication.limit.LimitExceededException
 import no.novari.communication.message.MessageService
+import no.novari.communication.message.StoredMessage
 import no.novari.communication.message.domain.EmailPayload
 import no.novari.communication.message.domain.MessageId
+import no.novari.communication.model.FailureReason
+import no.novari.communication.model.MessageStatus
 import no.novari.communication.model.Tenant
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
@@ -68,6 +71,7 @@ class DispatchWorkerIntegrationTest {
     fun setUp() {
         jdbcClient.sql("DELETE FROM send_usage").update()
         jdbcClient.sql("DELETE FROM dispatch_queue").update()
+        jdbcClient.sql("DELETE FROM message").update()
         emailAdapter.reset()
         clock.set(START)
     }
@@ -79,13 +83,17 @@ class DispatchWorkerIntegrationTest {
 
         val id = messageService.receive(Tenant.ROGALAND, payload)
 
-        assertThat(row(id)).isEqualTo(QueueRow("RECEIVED", 0, START))
+        assertThat(row(id)).isEqualTo(QueueRow(false, 0, START))
+        assertThat(status(id)).isEqualTo(Status(MessageStatus.RECEIVED, null, START))
         assertThat(emailAdapter.sent).isEmpty()
 
+        clock.advance(Duration.ofSeconds(2))
         worker.processDue()
 
         assertThat(emailAdapter.sent).containsExactly(id to payload)
         assertThat(row(id)).isNull()
+        assertThat(status(id)).isEqualTo(Status(MessageStatus.SENT, null, START + Duration.ofSeconds(2)))
+        assertThat(messageService.find(id).receivedAt).isEqualTo(START)
         assertThat(counter(DispatchMetrics.SENT_METRIC)).isEqualTo(sentBefore + 1)
     }
 
@@ -97,7 +105,8 @@ class DispatchWorkerIntegrationTest {
 
         worker.processDue()
 
-        assertThat(row(id)).isEqualTo(QueueRow("RECEIVED", 1, START + Duration.ofMinutes(1)))
+        assertThat(row(id)).isEqualTo(QueueRow(false, 1, START + Duration.ofMinutes(1)))
+        assertThat(status(id)).isEqualTo(Status(MessageStatus.RECEIVED, null, START))
         assertThat(counter(DispatchMetrics.RETRIED_METRIC, "reason" to RetryReason.SERVER_ERROR.value))
             .isEqualTo(retriedBefore + 1)
 
@@ -109,6 +118,7 @@ class DispatchWorkerIntegrationTest {
         worker.processDue()
         assertThat(emailAdapter.sent.map { it.first }).containsExactly(id, id)
         assertThat(row(id)).isNull()
+        assertThat(status(id)).isEqualTo(Status(MessageStatus.SENT, null, clock.instant()))
     }
 
     @Test
@@ -141,6 +151,7 @@ class DispatchWorkerIntegrationTest {
 
         assertThat(emailAdapter.sent).hasSize(3)
         assertThat(row(id)).isNull()
+        assertThat(status(id)).isEqualTo(Status(MessageStatus.FAILED, FailureReason.RETRIES_EXHAUSTED, clock.instant()))
         assertThat(counter(DispatchMetrics.FAILED_METRIC, "reason" to FailureReason.RETRIES_EXHAUSTED.value))
             .isEqualTo(failedBefore + 1)
     }
@@ -157,6 +168,7 @@ class DispatchWorkerIntegrationTest {
 
         assertThat(emailAdapter.sent).hasSize(1)
         assertThat(row(id)).isNull()
+        assertThat(status(id)).isEqualTo(Status(MessageStatus.FAILED, FailureReason.REJECTED, START))
         assertThat(counter(DispatchMetrics.FAILED_METRIC, "reason" to FailureReason.REJECTED.value))
             .isEqualTo(failedBefore + 1)
     }
@@ -180,7 +192,7 @@ class DispatchWorkerIntegrationTest {
         worker.processDue()
 
         assertThat(emailAdapter.sent.map { it.first }).containsExactly(intact)
-        assertThat(row(corrupted)).isEqualTo(QueueRow("RECEIVED", 1, START + Duration.ofMinutes(1)))
+        assertThat(row(corrupted)).isEqualTo(QueueRow(false, 1, START + Duration.ofMinutes(1)))
 
         clock.advance(Duration.ofMinutes(1))
         worker.processDue()
@@ -188,6 +200,8 @@ class DispatchWorkerIntegrationTest {
         worker.processDue()
 
         assertThat(row(corrupted)).isNull()
+        assertThat(status(corrupted).status).isEqualTo(MessageStatus.FAILED)
+        assertThat(status(intact).status).isEqualTo(MessageStatus.SENT)
         assertThat(emailAdapter.sent.map { it.first }).containsExactly(intact)
         assertThat(counter(DispatchMetrics.RETRIED_METRIC, "reason" to RetryReason.UNEXPECTED.value))
             .isEqualTo(retriedBefore + 2)
@@ -202,13 +216,15 @@ class DispatchWorkerIntegrationTest {
 
         worker.processDue()
         assertThat(emailAdapter.sent).isEmpty()
-        assertThat(row(id)?.status).isEqualTo("PROCESSING")
+        assertThat(row(id)?.locked).isTrue()
+        assertThat(status(id).status).isEqualTo(MessageStatus.RECEIVED)
 
         clock.advance(Duration.ofMinutes(5))
         worker.processDue()
 
         assertThat(emailAdapter.sent.map { it.first }).containsExactly(id)
         assertThat(row(id)).isNull()
+        assertThat(status(id)).isEqualTo(Status(MessageStatus.SENT, null, START + Duration.ofMinutes(5)))
         assertThat(repository.delete(abandoned)).isFalse()
     }
 
@@ -221,7 +237,45 @@ class DispatchWorkerIntegrationTest {
 
         assertThat(repository.reschedule(abandoned, clock.instant())).isFalse()
         assertThat(repository.delete(abandoned)).isFalse()
-        assertThat(row(id)).isEqualTo(QueueRow("PROCESSING", current.attempts, START))
+        assertThat(row(id)).isEqualTo(QueueRow(true, current.attempts, START))
+    }
+
+    @Test
+    fun `a late failure from an attempt that lost its lease does not overwrite the status of the newer attempt`() {
+        val failedBefore = counter(DispatchMetrics.FAILED_METRIC, "reason" to FailureReason.REJECTED.value)
+        emailAdapter.respondWith(
+            EmailSendOutcome.Sent,
+            EmailSendOutcome.Permanent(FailureReason.REJECTED, "HTTP 400"),
+        )
+        val id = messageService.receive(Tenant.ROGALAND, payload())
+        emailAdapter.beforeNextResponse { takeOverAfterLease() }
+
+        worker.processDue()
+
+        assertThat(emailAdapter.sent.map { it.first }).containsExactly(id, id)
+        assertThat(status(id)).isEqualTo(Status(MessageStatus.SENT, null, START + Duration.ofMinutes(5)))
+        assertThat(counter(DispatchMetrics.FAILED_METRIC, "reason" to FailureReason.REJECTED.value))
+            .isEqualTo(failedBefore)
+    }
+
+    @Test
+    fun `a late success from an attempt that lost its lease does not mark the message as sent`() {
+        emailAdapter.respondWith(
+            EmailSendOutcome.Retryable(RetryReason.SERVER_ERROR, "HTTP 503"),
+            EmailSendOutcome.Sent,
+        )
+        val id = messageService.receive(Tenant.ROGALAND, payload())
+        emailAdapter.beforeNextResponse { takeOverAfterLease() }
+
+        worker.processDue()
+
+        assertThat(status(id)).isEqualTo(Status(MessageStatus.RECEIVED, null, START))
+        assertThat(row(id)).isEqualTo(QueueRow(false, 2, clock.instant() + Duration.ofSeconds(90)))
+
+        clock.advance(Duration.ofSeconds(90))
+        worker.processDue()
+
+        assertThat(status(id)).isEqualTo(Status(MessageStatus.SENT, null, clock.instant()))
     }
 
     @Test
@@ -253,6 +307,8 @@ class DispatchWorkerIntegrationTest {
 
         assertThat(jdbcClient.sql("SELECT count(*) FROM dispatch_queue").query(Long::class.java).single())
             .isEqualTo(RECIPIENT_PER_HOUR.toLong())
+        assertThat(jdbcClient.sql("SELECT count(*) FROM message").query(Long::class.java).single())
+            .isEqualTo(RECIPIENT_PER_HOUR.toLong())
     }
 
     @Test
@@ -281,21 +337,41 @@ class DispatchWorkerIntegrationTest {
             .counter()
             ?.count() ?: 0.0
 
+    private fun takeOverAfterLease() {
+        clock.advance(Duration.ofMinutes(5))
+        worker.processDue()
+    }
+
+    private fun status(id: MessageId): Status = messageService.find(id).let(::Status)
+
     private fun row(id: MessageId): QueueRow? =
         jdbcClient
-            .sql("SELECT status, attempts, next_attempt_at FROM dispatch_queue WHERE message_id = :id")
-            .param("id", id.value)
+            .sql(
+                """
+                SELECT locked_until IS NOT NULL AS locked, attempts, next_attempt_at
+                FROM dispatch_queue
+                WHERE message_id = :id
+                """.trimIndent(),
+            ).param("id", id.value)
             .query { rs, _ ->
                 QueueRow(
-                    rs.getString("status"),
+                    rs.getBoolean("locked"),
                     rs.getInt("attempts"),
                     rs.getObject("next_attempt_at", OffsetDateTime::class.java).toInstant(),
                 )
             }.optional()
             .orElse(null)
 
+    private data class Status(
+        val status: MessageStatus,
+        val failureReason: FailureReason?,
+        val updatedAt: Instant,
+    ) {
+        constructor(message: StoredMessage) : this(message.status, message.failureReason, message.updatedAt)
+    }
+
     private data class QueueRow(
-        val status: String,
+        val locked: Boolean,
         val attempts: Int,
         val nextAttemptAt: Instant,
     )
