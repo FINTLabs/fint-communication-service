@@ -36,16 +36,14 @@ communication:
       per-day: 40
     tenant:
       default:
-        per-hour: 100
+        per-hour: 40
         per-day: 500
     total:
-      per-hour: 500
+      per-hour: 80
       per-day: 2000
     usage-refresh: 60s
   email:
     provider: logging
-    acs:
-      operation-timeout: 2m
     delivery-reports:
       enabled: false
       queue-name: email-delivery-reports

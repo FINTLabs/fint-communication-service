@@ -1,7 +1,6 @@
 package no.novari.communication.email
 
 import org.springframework.boot.context.properties.ConfigurationProperties
-import java.time.Duration
 
 @ConfigurationProperties("communication.email")
 data class EmailProperties(
@@ -17,7 +16,6 @@ enum class EmailProvider {
 
 class AcsProperties(
     val connectionString: String? = null,
-    val operationTimeout: Duration = Duration.ofMinutes(2),
 ) {
-    override fun toString(): String = "AcsProperties(connectionString=***, operationTimeout=$operationTimeout)"
+    override fun toString(): String = "AcsProperties(connectionString=***)"
 }

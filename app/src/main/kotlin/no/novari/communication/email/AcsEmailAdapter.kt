@@ -4,33 +4,31 @@ import com.azure.communication.email.EmailClient
 import com.azure.communication.email.EmailClientBuilder
 import com.azure.communication.email.models.EmailAddress
 import com.azure.communication.email.models.EmailMessage
-import com.azure.communication.email.models.EmailSendResult
 import com.azure.core.exception.HttpResponseException
 import com.azure.core.http.HttpHeaderName
 import com.azure.core.http.HttpResponse
+import com.azure.core.http.policy.ExponentialBackoff
 import com.azure.core.http.policy.HttpLogDetailLevel
 import com.azure.core.http.policy.HttpLogOptions
-import com.azure.core.util.polling.LongRunningOperationStatus
-import com.azure.core.util.polling.PollResponse
+import com.azure.core.http.policy.RetryPolicy
+import com.azure.core.http.policy.RetryStrategy
 import no.novari.communication.message.domain.EmailPayload
 import no.novari.communication.message.domain.MessageId
 import no.novari.communication.model.FailureReason
 import java.io.IOException
 import java.time.Duration
-import java.util.concurrent.TimeoutException
 
 class AcsEmailAdapter(
     private val client: EmailClient,
     private val sender: String,
-    private val operationTimeout: Duration,
 ) : EmailAdapter {
     override fun send(
         id: MessageId,
         email: EmailPayload,
     ): EmailSendOutcome =
         try {
-            val poller = client.beginSend(email.toAcsMessage(), OperationIdPolicy.context(id))
-            outcome(poller.waitForCompletion(operationTimeout))
+            client.beginSend(email.toAcsMessage(), OperationIdPolicy.context(id))
+            EmailSendOutcome.Sent
         } catch (exception: HttpResponseException) {
             outcome(exception.response)
         } catch (exception: RuntimeException) {
@@ -46,26 +44,6 @@ class AcsEmailAdapter(
                 .setBodyHtml(body)
                 .setUserEngagementTrackingDisabled(true)
         return replyTo?.let { message.setReplyTo(EmailAddress(it)) } ?: message
-    }
-
-    private fun outcome(response: PollResponse<EmailSendResult>): EmailSendOutcome {
-        val status = response.status
-        return when {
-            status == LongRunningOperationStatus.SUCCESSFULLY_COMPLETED -> {
-                EmailSendOutcome.Sent
-            }
-
-            status.isComplete -> {
-                EmailSendOutcome.Permanent(
-                    FailureReason.OPERATION_FAILED,
-                    "status=${response.value?.status ?: status} error=${response.value?.error?.code ?: "ukjent"}",
-                )
-            }
-
-            else -> {
-                EmailSendOutcome.Retryable(RetryReason.TIMEOUT, "status=${response.value?.status ?: status}")
-            }
-        }
     }
 
     private fun outcome(response: HttpResponse?): EmailSendOutcome {
@@ -96,19 +74,11 @@ class AcsEmailAdapter(
     }
 
     private fun outcome(exception: RuntimeException): EmailSendOutcome {
-        val causes = generateSequence<Throwable>(exception) { it.cause }.toList()
-        return when {
-            causes.any { it is TimeoutException } -> {
-                EmailSendOutcome.Retryable(RetryReason.TIMEOUT, "ingen sluttstatus innen $operationTimeout")
-            }
-
-            causes.any { it is IOException } -> {
-                EmailSendOutcome.Retryable(RetryReason.IO, causes.first { it is IOException }.javaClass.simpleName)
-            }
-
-            else -> {
-                EmailSendOutcome.Retryable(RetryReason.UNEXPECTED, exception.javaClass.simpleName)
-            }
+        val io = generateSequence<Throwable>(exception) { it.cause }.firstOrNull { it is IOException }
+        return if (io != null) {
+            EmailSendOutcome.Retryable(RetryReason.IO, io.javaClass.simpleName)
+        } else {
+            EmailSendOutcome.Retryable(RetryReason.UNEXPECTED, exception.javaClass.simpleName)
         }
     }
 
@@ -126,10 +96,14 @@ class AcsEmailAdapter(
         private const val HTTP_TOO_MANY_REQUESTS = 429
         private const val HTTP_SERVER_ERROR = 500
 
-        fun clientBuilder(connectionString: String): EmailClientBuilder =
+        fun clientBuilder(
+            connectionString: String,
+            retryStrategy: RetryStrategy = ExponentialBackoff(),
+        ): EmailClientBuilder =
             EmailClientBuilder()
                 .connectionString(connectionString)
                 .addPolicy(OperationIdPolicy())
+                .retryPolicy(RetryPolicy(ThrottlingNotRetried(retryStrategy)))
                 .httpLogOptions(HttpLogOptions().setLogLevel(HttpLogDetailLevel.NONE))
     }
 }

@@ -7,8 +7,7 @@ import com.azure.core.http.HttpHeaders
 import com.azure.core.http.HttpMethod
 import com.azure.core.http.HttpRequest
 import com.azure.core.http.HttpResponse
-import com.azure.core.http.policy.FixedDelayOptions
-import com.azure.core.http.policy.RetryOptions
+import com.azure.core.http.policy.FixedDelay
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import java.nio.ByteBuffer
@@ -20,22 +19,16 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 class FakeAcs : HttpClient {
     private val sendResponses = ConcurrentLinkedQueue<Response>()
-    private val pollResponses = ConcurrentLinkedQueue<Response>()
     val requests = CopyOnWriteArrayList<RecordedRequest>()
 
     fun onSend(vararg responses: Response) {
         sendResponses += responses
     }
 
-    fun onPoll(vararg responses: Response) {
-        pollResponses += responses
-    }
-
     fun client(sdkRetries: Int = 0): EmailClient =
         AcsEmailAdapter
-            .clientBuilder(CONNECTION_STRING)
+            .clientBuilder(CONNECTION_STRING, FixedDelay(sdkRetries, Duration.ofMillis(1)))
             .httpClient(this)
-            .retryOptions(RetryOptions(FixedDelayOptions(sdkRetries, Duration.ofMillis(1))))
             .buildClient()
 
     val sendRequests: List<RecordedRequest>
@@ -48,7 +41,7 @@ class FakeAcs : HttpClient {
             if (request.httpMethod == HttpMethod.POST) {
                 sendResponses.poll() ?: accepted()
             } else {
-                pollResponses.poll() ?: status("Succeeded")
+                succeeded()
             }
         return when (response) {
             is Response.Failure -> Mono.error(response.exception)
@@ -117,20 +110,8 @@ class FakeAcs : HttpClient {
                     ),
             )
 
-        fun status(
-            status: String,
-            errorCode: String? = null,
-            errorMessage: String = "",
-        ): Response =
-            Response.Http(
-                status = 200,
-                body =
-                    if (errorCode == null) {
-                        """{"id":"$OPERATION_ID","status":"$status"}"""
-                    } else {
-                        """{"id":"$OPERATION_ID","status":"$status","error":{"code":"$errorCode","message":"$errorMessage"}}"""
-                    },
-            )
+        private fun succeeded(): Response =
+            Response.Http(status = 200, body = """{"id":"$OPERATION_ID","status":"Succeeded"}""")
 
         fun error(
             status: Int,

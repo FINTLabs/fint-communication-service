@@ -69,14 +69,13 @@ class AcsLoggingPrivacyTest {
             FakeAcs.error(429, "TooManyRequests", "For mange meldinger til $ADDRESS"),
             FakeAcs.accepted(),
         )
-        acs.onPoll(FakeAcs.status("Failed", "EmailDroppedAllRecipientsSuppressed", "$ADDRESS er undertrykt"))
         val worker =
             DispatchWorker(
                 repository,
                 messageStore,
                 transactions,
                 codec,
-                AcsEmailAdapter(acs.client(sdkRetries = 1), "no-reply@novari.no", Duration.ofSeconds(10)),
+                AcsEmailAdapter(acs.client(sdkRetries = 1), "no-reply@novari.no"),
                 metrics,
                 properties,
                 clock,
@@ -95,7 +94,7 @@ class AcsLoggingPrivacyTest {
 
         assertThat(acs.sendRequests).hasSizeGreaterThanOrEqualTo(4)
         assertThat(output.all)
-            .contains("InvalidRecipient", "EmailDroppedAllRecipientsSuppressed")
+            .contains("InvalidRecipient", "TooManyRequests")
             .doesNotContainIgnoringCase(ADDRESS)
             .doesNotContain(SUBJECT, BODY, FakeAcs.ACCESS_KEY, FakeAcs.ENDPOINT)
         val tagValues = meterRegistry.meters.flatMap { meter -> meter.id.tags.map { it.value } }
