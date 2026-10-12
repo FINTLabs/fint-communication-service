@@ -4,4 +4,8 @@ enum class MessageStatus {
     RECEIVED,
     SENT,
     FAILED,
+    DELIVERED,
+    BOUNCED,
+    SUPPRESSED,
+    FILTERED_SPAM,
 }

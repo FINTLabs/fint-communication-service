@@ -17,4 +17,11 @@ interface MessageStore {
         failureReason: FailureReason?,
         at: Instant,
     )
+
+    fun applyReport(
+        id: MessageId,
+        status: MessageStatus,
+        failureReason: FailureReason?,
+        at: Instant,
+    ): ReportOutcome
 }

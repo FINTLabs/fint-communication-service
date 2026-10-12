@@ -49,6 +49,13 @@ class MessageServiceTest {
                         failureReason: FailureReason?,
                         at: Instant,
                     ) = throw UnsupportedOperationException()
+
+                    override fun applyReport(
+                        id: MessageId,
+                        status: MessageStatus,
+                        failureReason: FailureReason?,
+                        at: Instant,
+                    ) = throw UnsupportedOperationException()
                 },
             dispatcher = { message ->
                 steps += "dispatch"

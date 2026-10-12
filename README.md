@@ -21,7 +21,9 @@ konfigurert (se [Utsending](#utsending)). Status for meldingen slås opp med
 per døgn (se [Grenser](#grenser)), og mottakere som har meldt seg av eller hard-bouncet, avvises
 (se [Blokkeringsliste](#blokkeringsliste)). Azure Communication Services (ACS) er klar i koden,
 men ressursen finnes ikke ennå (FFS-1965), så alle miljøer bruker foreløpig leverandøren `logging`,
-som logger og forkaster meldingen. Layout og autentisering kommer i egne oppgaver under
+som logger og forkaster meldingen. Leveringsrapportene fra ACS (levert, bounce, spam) gir sluttstatus
+og blokkerer adresser som bouncer, men mottaket er slått av til køen finnes (FFS-2339, se
+[Leveringsrapporter](#leveringsrapporter)). Layout og autentisering kommer i egne oppgaver under
 [FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
 
 ## Moduler
@@ -102,25 +104,31 @@ gjentar aldri verdiene som ble sendt inn.
 }
 ```
 
-| `status`   | Betyr                                                                                                                          |
-|------------|--------------------------------------------------------------------------------------------------------------------------------|
-| `RECEIVED` | Akseptert og lagt i køen, men ikke sendt ennå. Gjelder også mens tjenesten venter på et nytt forsøk etter en forbigående feil. |
-| `SENT`     | ACS har tatt imot meldingen for levering. Det betyr ikke at den er levert til mottakeren.                                      |
-| `FAILED`   | Meldingen ble ikke sendt, og tjenesten prøver ikke igjen. `failureReason` sier hvorfor.                                        |
+| `status`        | Betyr                                                                                                                          |
+|-----------------|--------------------------------------------------------------------------------------------------------------------------------|
+| `RECEIVED`      | Akseptert og lagt i køen, men ikke sendt ennå. Gjelder også mens tjenesten venter på et nytt forsøk etter en forbigående feil. |
+| `SENT`          | ACS har tatt imot meldingen for levering. Det betyr ikke at den er levert til mottakeren.                                      |
+| `DELIVERED`     | Mottakerens e-postserver har tatt imot meldingen (leveringsrapport).                                                           |
+| `BOUNCED`       | Adressen eller domenet finnes ikke (hard bounce). Mottakeren blokkeres i 30 dager.                                             |
+| `SUPPRESSED`    | ACS sendte ikke, fordi adressen har hard-bouncet før. Mottakeren blokkeres i 30 dager.                                         |
+| `FILTERED_SPAM` | Mottakerens server avviste meldingen som spam eller satte den i karantene.                                                     |
+| `FAILED`        | Meldingen ble ikke sendt eller ikke levert, og tjenesten prøver ikke igjen. `failureReason` sier hvorfor.                      |
 
 | `failureReason`     | Betyr                                                                                              | Nytt forsøk                |
 |---------------------|----------------------------------------------------------------------------------------------------|----------------------------|
 | `REJECTED`          | ACS avviste forespørselen (4xx).                                                                   | Hjelper ikke uten endring. |
 | `OPERATION_FAILED`  | ACS tok imot forespørselen, men operasjonen feilet, f.eks. fordi mottakeren er undertrykt hos ACS. | Hjelper ikke uten endring. |
 | `RETRIES_EXHAUSTED` | Forbigående feil i alle 8 forsøkene (ca. 2 timer).                                                 | Kan sendes på nytt senere. |
+| `DELIVERY_FAILED`   | ACS sendte meldingen, men leveringsrapporten sier at den ikke ble levert.                          | Kan sendes på nytt senere. |
 
 `failureReason` er `null` når status ikke er `FAILED`. `updatedAt` er når status sist ble endret.
 Svaret har aldri mottaker, mal, emne eller innhold, og det er ingen tenant-sjekk. Ukjent ID, eller en
 melding som er slettet etter 60 dager, gir `404`. En ID som ikke er en UUID, gir `400`.
 
-Leveringsrapportene fra ACS (levert, bounce, undertrykt, spam) kommer asynkront, sekunder til
-minutter etter `SENT`. De blir egne statuser med FFS-2338; til da er `SENT` den siste statusen for en
-melding som gikk gjennom.
+`DELIVERED`, `BOUNCED`, `SUPPRESSED`, `FILTERED_SPAM` og `FAILED` med `DELIVERY_FAILED` kommer fra
+leveringsrapportene fra ACS, sekunder til minutter etter `SENT` (se
+[Leveringsrapporter](#leveringsrapporter)). De er endelige: den første rapporten gjelder. Så lenge
+mottaket er slått av, er `SENT` den siste statusen for en melding som gikk gjennom.
 
 ## Grenser
 
@@ -203,7 +211,7 @@ tjenesten. Listen er felles for alle tenants og sjekkes ved innsending, før gre
 | Årsak         | Varighet                   | Legges inn av                                                                                            |
 |---------------|----------------------------|----------------------------------------------------------------------------------------------------------|
 | `OPT_OUT`     | Til den fjernes manuelt.   | [Driftsrutinen](#driftsrutine-for-blokkeringslisten).                                                    |
-| `HARD_BOUNCE` | 30 dager fra siste bounce. | Driftsrutinen. Senere automatisk fra ACS ([FFS-2338](https://novari-iks.atlassian.net/browse/FFS-2338)). |
+| `HARD_BOUNCE` | 30 dager fra siste bounce. | Driftsrutinen, og automatisk fra [leveringsrapportene](#leveringsrapporter) (`Bounced` og `Suppressed`). |
 
 - Mottakeren kjennes igjen på samme måte som for grensene: adressen etter `trim` og små bokstaver.
 - En blokkert mottaker gir `422 Unprocessable Content`. Svaret sier ikke om årsaken er opt-out eller
@@ -343,6 +351,34 @@ Leverandøren velges med `communication.email.provider`:
 | `logging` | `LoggingEmailAdapter` | Default. Logger meldings-ID og mal og regner meldingen som sendt. Lokalt, i tester og i beta til ACS finnes. |
 | `acs`     | `AcsEmailAdapter`     | Sender via Azure Communication Services. Krever connection string og avsenderadresse.                        |
 
+## Leveringsrapporter
+
+ACS sender en leveringsrapport (`EmailDeliveryReportReceived`) for hver e-post, sekunder til minutter
+etter at den er sendt. Event Grid legger rapportene i Storage-køen `email-delivery-reports` som
+CloudEvents, og tjenesten henter dem hvert 10. sekund. Mottaket er slått av som default og i beta,
+siden køen ikke finnes ennå ([FFS-2339](https://novari-iks.atlassian.net/browse/FFS-2339)); se
+[Slå på leveringsrapporter](#slå-på-leveringsrapporter).
+
+| Rapport fra ACS               | Status                       | Blokkering               |
+|-------------------------------|------------------------------|--------------------------|
+| `Delivered`                   | `DELIVERED`                  | –                        |
+| `Bounced`                     | `BOUNCED`                    | `HARD_BOUNCE` i 30 dager |
+| `Suppressed`                  | `SUPPRESSED`                 | `HARD_BOUNCE` i 30 dager |
+| `FilteredSpam`, `Quarantined` | `FILTERED_SPAM`              | –                        |
+| `Failed`                      | `FAILED` (`DELIVERY_FAILED`) | –                        |
+| `Expanded`                    | Uendret                      | –                        |
+
+- En rapport endrer bare en melding som er `RECEIVED` eller `SENT`; den første rapporten gjelder, og
+  samme rapport to ganger gir samme resultat.
+- Blokkeringen gjelder i 30 dager fra tidspunktet i rapporten. Den forlenger en eksisterende
+  blokkering, men forkorter den aldri, og en opt-out berøres ikke. Den skrives også når meldingen er
+  ukjent (f.eks. slettet etter 60 dager), siden adressen står i rapporten.
+- Adressen i rapporten hashes med en gang og lagres, logges eller telles aldri i klartekst.
+- En rapport slettes fra køen først når den er lagret. Rapporter som ikke kan leses, andre
+  hendelsestyper og rapporter som har feilet 5 ganger, logges uten innhold, telles og slettes.
+- Er køen utilgjengelig, logges og telles det, og tjenesten fortsetter som før. Køen er ikke med i
+  helsesjekkene, så tjenesten tar fortsatt imot meldinger.
+
 ## Lokal utvikling
 
 Krever Java 25 og Docker. Testene og lokal kjøring starter Postgres med Testcontainers.
@@ -359,7 +395,9 @@ med Jackson 2 (`:client:test`) og Spring Framework 7 med Jackson 3 (`:client:tes
 ```
 
 `bootTestRun` starter appen med en Postgres-container og testnøkler for mottaker-hashing og
-kryptering av køen. Leverandøren er `logging`, så ingenting sendes. Testmalen viser hele flyten:
+kryptering av køen. Leverandøren er `logging`, så ingenting sendes, og mottaket av
+leveringsrapporter er slått av. Testene for leveringsrapportene bruker en Azurite-container
+(Azure Storage-emulator) med ekte køer. Testmalen viser hele flyten:
 
 ```bash
 curl -i -X POST localhost:8080/api/v1/messages -H 'Content-Type: application/json' -d '{"tenant":"NOVARI","message":{"channel":"EMAIL","to":"test@novari.no","templateId":"novari/test","variables":{"melding":"Hei"}}}'
@@ -384,6 +422,14 @@ Loggen er JSON, også lokalt og i testene. Lesbar tekst får man med et tomt for
 | `communication.email.sender`                                                                                          | Avsenderadressen. Påkrevd med `acs`, og må være verifisert i ACS.                                                                   |
 | `COMMUNICATION_EMAIL_ACS_CONNECTION_STRING`                                                                           | Connection string til ACS-ressursen. Fra 1Password. Påkrevd med `acs`.                                                              |
 | `communication.email.acs.operation-timeout`                                                                           | Hvor lenge det ventes på at ACS bekrefter en sending. `2m` i `application.yaml`.                                                    |
+| `communication.email.delivery-reports.enabled`                                                                        | Mottak av leveringsrapporter. `false` (default).                                                                                    |
+| `COMMUNICATION_EMAIL_DELIVERY_REPORTS_CONNECTION_STRING`                                                              | Connection string til Storage-kontoen med køen. Fra 1Password. Påkrevd når mottaket er slått på.                                    |
+| `communication.email.delivery-reports.queue-name`                                                                     | Køen Event Grid skriver til (`email-delivery-reports`).                                                                             |
+| `communication.email.delivery-reports.poll-interval`, `communication.email.delivery-reports.batch-size`               | Hvor ofte køen sjekkes (`10s`) og hvor mange rapporter som hentes om gangen (`32`, høyst 32).                                       |
+| `communication.email.delivery-reports.visibility-timeout`                                                             | Hvor lenge en hentet rapport er usynlig for andre før den kan hentes på nytt (`5m`).                                                |
+| `communication.email.delivery-reports.max-dequeue-count`                                                              | Antall ganger en rapport kan hentes før den forkastes som poison (`5`).                                                             |
+| `communication.email.delivery-reports.block-for`                                                                      | Hvor lenge en bounce blokkerer mottakeren, regnet fra tidspunktet i rapporten (`30d`).                                              |
+| `communication.email.delivery-reports.queue-metrics-refresh`                                                          | Hvor ofte lengden på rapportkøen leses (`60s`).                                                                                     |
 | `communication.dispatch.poll-interval`, `communication.dispatch.batch-size`                                           | Hvor ofte køen sjekkes (`2s`) og hvor mange meldinger som hentes om gangen (`10`).                                                  |
 | `communication.dispatch.lease`                                                                                        | Hvor lenge en melding er reservert av en pod før en annen kan ta den (`5m`).                                                        |
 | `communication.dispatch.max-attempts`, `communication.dispatch.initial-backoff`, `communication.dispatch.max-backoff` | Antall forsøk og ventetid mellom dem (`8`, `1m`, `1h`).                                                                             |
@@ -502,26 +548,32 @@ Opprett en GitHub-release med tag `vX.Y.Z`. `Publish to Reposilite`-workflowen p
 ## Drift og varsling
 
 Tjenesten publiserer disse metrikkene på `/actuator/prometheus`, i tillegg til Spring Boots egne. Ingen
-av dem har adresse eller hash som tag.
+av dem har adresse eller hash som tag. Metrikkene for leveringsrapporter finnes bare når mottaket er
+slått på.
 
-| Metrikk                                       | Tagger                                            | Betydning                                                |
-|-----------------------------------------------|---------------------------------------------------|----------------------------------------------------------|
-| `communication_message_accepted_total`        | `tenant`, `channel`                               | Aksepterte meldinger (`202`).                            |
-| `communication_limit_rejected_total`          | `limit` (`mottaker`, `tenant`, `total`), `tenant` | Meldinger avvist av en grense (`429`).                   |
-| `communication_blocklist_rejected_total`      | `tenant`                                          | Meldinger avvist fordi mottakeren er blokkert (`422`).   |
-| `communication_limit_tenant_usage_ratio`      | `tenant`, `window` (`hour`, `day`)                | Forbruk delt på tenantgrensen, siste time og siste døgn. |
-| `communication_limit_total_usage_ratio`       | `window` (`hour`, `day`)                          | Forbruk delt på totalgrensen, siste time og siste døgn.  |
-| `communication_message_sent_total`            | `tenant`, `channel`                               | Meldinger sendt til leverandøren.                        |
-| `communication_message_retried_total`         | `tenant`, `channel`, `reason`                     | Forbigående feil som gir nytt forsøk.                    |
-| `communication_message_failed_total`          | `tenant`, `channel`, `reason`                     | Meldinger som ikke ble sendt.                            |
-| `communication_dispatch_queue_size`           | –                                                 | Meldinger i køen.                                        |
-| `communication_dispatch_queue_oldest_seconds` | –                                                 | Alderen på den eldste meldingen i køen.                  |
+| Metrikk                                           | Tagger                                                                | Betydning                                                          |
+|---------------------------------------------------|-----------------------------------------------------------------------|--------------------------------------------------------------------|
+| `communication_message_accepted_total`            | `tenant`, `channel`                                                   | Aksepterte meldinger (`202`).                                      |
+| `communication_limit_rejected_total`              | `limit` (`mottaker`, `tenant`, `total`), `tenant`                     | Meldinger avvist av en grense (`429`).                             |
+| `communication_blocklist_rejected_total`          | `tenant`                                                              | Meldinger avvist fordi mottakeren er blokkert (`422`).             |
+| `communication_limit_tenant_usage_ratio`          | `tenant`, `window` (`hour`, `day`)                                    | Forbruk delt på tenantgrensen, siste time og siste døgn.           |
+| `communication_limit_total_usage_ratio`           | `window` (`hour`, `day`)                                              | Forbruk delt på totalgrensen, siste time og siste døgn.            |
+| `communication_message_sent_total`                | `tenant`, `channel`                                                   | Meldinger sendt til leverandøren.                                  |
+| `communication_message_retried_total`             | `tenant`, `channel`, `reason`                                         | Forbigående feil som gir nytt forsøk.                              |
+| `communication_message_failed_total`              | `tenant`, `channel`, `reason`                                         | Meldinger som ikke ble sendt.                                      |
+| `communication_dispatch_queue_size`               | –                                                                     | Meldinger i køen.                                                  |
+| `communication_dispatch_queue_oldest_seconds`     | –                                                                     | Alderen på den eldste meldingen i køen.                            |
+| `communication_delivery_report_received_total`    | `tenant`, `channel`, `template`, `status`                             | Leveringsrapporter for kjente meldinger, per status fra rapporten. |
+| `communication_delivery_report_discarded_total`   | `reason` (`invalid`, `unsupported-type`, `unknown-message`, `poison`) | Rapporter som ble forkastet.                                       |
+| `communication_delivery_report_poll_failed_total` | –                                                                     | Feil mot rapportkøen.                                              |
+| `communication_delivery_report_queue_size`        | –                                                                     | Rapporter som venter i køen.                                       |
 
 Utnyttelsen og kø-metrikkene regnes ut fra databasen hvert minutt og er like på alle replikaer, så
 bruk `max` og ikke `sum` på tvers av pods.
 
 **Dashboard.** [`grafana/fint-communication-service.json`](grafana/fint-communication-service.json)
-viser utnyttelse, avvisninger, aksepterte, sendte og feilede meldinger per tenant, og utsendingskøen. Det importeres manuelt i Grafana
+viser utnyttelse, avvisninger, aksepterte, sendte og feilede meldinger per tenant, utsendingskøen,
+leveringsrapporter per status, bounce-rate og rapportkøen. Det importeres manuelt i Grafana
 (Dashboards → New → Import → last opp filen, og velg Prometheus-datakilden). Endringer gjøres i Grafana,
 eksporteres som JSON og legges inn i repoet med PR.
 
@@ -532,7 +584,11 @@ eksporteres som JSON og legges inn i repoet med PR.
 - over 10 avvisninger på mottakergrensen per tenant per time,
 - over 10 blokkerte innsendinger per tenant per time,
 - meldinger som ikke ble sendt,
-- en melding som har ligget i køen i over 15 minutter.
+- en melding som har ligget i køen i over 15 minutter,
+- bounce-rate over 5 % siste time (minst 20 rapporter),
+- leveringsrapporter forkastet som poison,
+- over 1000 rapporter i rapportkøen i 15 minutter,
+- feil mot rapportkøen i 15 minutter.
 
 Reglene registreres manuelt i Grafana Alerts med uttrykkene, tersklene og varighetene i runbooken.
 
@@ -574,3 +630,27 @@ Når ACS-ressursen, domenet og avsenderadressen finnes (FFS-1965):
 
 Mangler connection string eller avsender når leverandøren er `acs`, stopper oppstarten med en melding
 som nevner variabelnavnet, aldri verdien.
+
+### Slå på leveringsrapporter
+
+Når ACS er slått på, og Storage-køen og Event Grid-abonnementet finnes
+([FFS-2339](https://novari-iks.atlassian.net/browse/FFS-2339)):
+
+1. Sjekk at abonnementet bruker skjemaet CloudEvents 1.0, er filtrert på
+   `Microsoft.Communication.EmailDeliveryReportReceived` og skriver til køen `email-delivery-reports`.
+2. Legg connection string til Storage-kontoen inn som feltet
+   `COMMUNICATION_EMAIL_DELIVERY_REPORTS_CONNECTION_STRING` i 1Password-itemet.
+3. Slå på mottaket i overlayet og deploy:
+
+   ```yaml
+   - op: add
+     path: "/spec/env/-"
+     value:
+       name: "communication.email.delivery-reports.enabled"
+       value: "true"
+   ```
+
+4. Følg [Verifisere leveringsrapporter](docs/runbook.md#verifisere-leveringsrapporter) i runbooken.
+
+Mangler connection string når mottaket er slått på, stopper oppstarten med en melding som nevner
+variabelnavnet, aldri verdien. At køen er utilgjengelig etter oppstart, stopper ikke tjenesten.

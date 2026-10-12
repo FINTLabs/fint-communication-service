@@ -42,6 +42,9 @@ dependencies {
         exclude(group = "com.azure", module = "azure-core-http-netty")
     }
     implementation("com.azure:azure-core-http-jdk-httpclient:1.2.0")
+    implementation("com.azure:azure-storage-queue:12.31.0") {
+        exclude(group = "com.azure", module = "azure-core-http-netty")
+    }
 
     testImplementation("org.springframework.boot:spring-boot-starter-actuator-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
@@ -49,6 +52,7 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:testcontainers-junit-jupiter")
     testImplementation("org.testcontainers:testcontainers-postgresql")
+    testImplementation("org.testcontainers:testcontainers-azure")
     testImplementation(kotlin("test"))
 
     runtimeOnly("io.micrometer:micrometer-registry-prometheus")

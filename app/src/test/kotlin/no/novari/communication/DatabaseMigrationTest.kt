@@ -102,6 +102,16 @@ class DatabaseMigrationTest {
     }
 
     @Test
+    fun `message accepts the statuses from the delivery reports`() {
+        listOf("DELIVERED", "BOUNCED", "SUPPRESSED", "FILTERED_SPAM").forEach { insertMessage(it, null) }
+        insertMessage("FAILED", "DELIVERY_FAILED")
+
+        assertThatThrownBy { insertMessage("EXPANDED", null) }.isInstanceOf(DataIntegrityViolationException::class.java)
+        assertThatThrownBy { insertMessage("BOUNCED", "DELIVERY_FAILED") }
+            .isInstanceOf(DataIntegrityViolationException::class.java)
+    }
+
+    @Test
     fun `a queued message must exist in message`() {
         assertThatThrownBy {
             jdbcClient
