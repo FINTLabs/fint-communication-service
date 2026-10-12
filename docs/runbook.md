@@ -1,8 +1,9 @@
-# Runbook: grenser og blokkerte innsendinger
+# Runbook: grenser, blokkerte innsendinger og utsending
 
 Runbooken beskriver hva vakthavende gjør når et varsel for fint-communication-service går. Grensene og
 blokkeringslisten er beskrevet i [README](../README.md#grenser) og
-[arkitekturdokumentet](architecture.md#grenser).
+[arkitekturdokumentet](architecture.md#grenser), og utsendingen i [README](../README.md#utsending) og
+[arkitekturdokumentet](architecture.md#hva-skjer-med-meldingen-etter-202).
 
 ## Innhold
 
@@ -14,22 +15,31 @@ blokkeringslisten er beskrevet i [README](../README.md#grenser) og
 6. [Totalgrense nådd](#totalgrense-nådd)
 7. [Mange mottaker-429](#mange-mottaker-429)
 8. [Mange blokkerte innsendinger](#mange-blokkerte-innsendinger)
-9. [Justere grenser](#justere-grenser)
-10. [Testvarsel](#testvarsel)
+9. [Meldinger feilet](#meldinger-feilet)
+10. [Køen står](#køen-står)
+11. [Justere grenser](#justere-grenser)
+12. [Testvarsel](#testvarsel)
+13. [Verifisere utsending](#verifisere-utsending)
 
 ## Metrikker
 
-| Metrikk (Prometheus)                     | Type    | Tagger                                            | Betydning                                              |
-|------------------------------------------|---------|---------------------------------------------------|--------------------------------------------------------|
-| `communication_limit_rejected_total`     | Counter | `limit` (`mottaker`, `tenant`, `total`), `tenant` | Meldinger avvist med 429.                              |
-| `communication_blocklist_rejected_total` | Counter | `tenant`                                          | Meldinger avvist med 422 fordi mottakeren er blokkert. |
-| `communication_message_accepted_total`   | Counter | `tenant`, `channel`                               | Meldinger akseptert med 202.                           |
-| `communication_limit_tenant_usage_ratio` | Gauge   | `tenant`, `window` (`hour`, `day`)                | Forbruk delt på tenantens grense i glidende vindu.     |
-| `communication_limit_total_usage_ratio`  | Gauge   | `window` (`hour`, `day`)                          | Forbruk delt på totalgrensen i glidende vindu.         |
+| Metrikk (Prometheus)                          | Type    | Tagger                                                                                                     | Betydning                                              |
+|-----------------------------------------------|---------|------------------------------------------------------------------------------------------------------------|--------------------------------------------------------|
+| `communication_limit_rejected_total`          | Counter | `limit` (`mottaker`, `tenant`, `total`), `tenant`                                                          | Meldinger avvist med 429.                              |
+| `communication_blocklist_rejected_total`      | Counter | `tenant`                                                                                                   | Meldinger avvist med 422 fordi mottakeren er blokkert. |
+| `communication_message_accepted_total`        | Counter | `tenant`, `channel`                                                                                        | Meldinger akseptert med 202.                           |
+| `communication_limit_tenant_usage_ratio`      | Gauge   | `tenant`, `window` (`hour`, `day`)                                                                         | Forbruk delt på tenantens grense i glidende vindu.     |
+| `communication_limit_total_usage_ratio`       | Gauge   | `window` (`hour`, `day`)                                                                                   | Forbruk delt på totalgrensen i glidende vindu.         |
+| `communication_message_sent_total`            | Counter | `tenant`, `channel`                                                                                        | Meldinger sendt til leverandøren.                      |
+| `communication_message_retried_total`         | Counter | `tenant`, `channel`, `reason` (`timeout`, `throttled`, `server-error`, `unauthorized`, `io`, `unexpected`) | Forbigående feil; meldingen prøves igjen.              |
+| `communication_message_failed_total`          | Counter | `tenant`, `channel`, `reason` (`rejected`, `operation-failed`, `retries-exhausted`)                        | Meldinger som ikke ble sendt.                          |
+| `communication_dispatch_queue_size`           | Gauge   | –                                                                                                          | Meldinger i køen (ikke sendt eller feilet ennå).       |
+| `communication_dispatch_queue_oldest_seconds` | Gauge   | –                                                                                                          | Alderen på den eldste meldingen i køen.                |
 
-Utnyttelsen regnes ut fra `send_usage` hvert minutt (`communication.limits.usage-refresh`), så den kan
-ligge opptil ett minutt etter. Hver replika rapporterer samme verdi, så bruk `max`, ikke `sum`, på
-tvers av pods. Ingen metrikk har adresse eller hash.
+Utnyttelsen regnes ut fra `send_usage` hvert minutt (`communication.limits.usage-refresh`), og kø-metrikkene
+fra `dispatch_queue` hvert minutt (`communication.dispatch.queue-metrics-refresh`), så de kan ligge opptil ett
+minutt etter. Hver replika rapporterer samme verdi, så bruk `max`, ikke `sum`, på tvers av pods. Ingen
+metrikk har adresse eller hash.
 
 Dashboardet ligger i [`grafana/fint-communication-service.json`](../grafana/fint-communication-service.json).
 
@@ -47,8 +57,12 @@ Tabellen er kilden: endres en regel i Grafana, oppdateres den her også.
 | Totalgrense nådd             | `sum (increase(communication_limit_rejected_total{$app, limit="total"}[5m])) > 0`                 | –       | critical    |
 | Mange mottaker-429           | `sum by (tenant) (increase(communication_limit_rejected_total{$app, limit="mottaker"}[1h])) > 10` | –       | warning     |
 | Mange blokkerte innsendinger | `sum by (tenant) (increase(communication_blocklist_rejected_total{$app}[1h])) > 10`               | –       | warning     |
+| Meldinger feilet             | `sum by (tenant, reason) (increase(communication_message_failed_total{$app}[15m])) > 0`           | –       | warning     |
+| Køen står                    | `max(communication_dispatch_queue_oldest_seconds{$app}) > 900`                                    | 5m      | critical    |
 
-Alle avvisninger på tenant- og totalgrensen varsles, siden de betyr at meldinger ikke blir sendt.
+Alle avvisninger på tenant- og totalgrensen varsles, siden de betyr at meldinger ikke blir sendt. Det
+samme gjelder alle meldinger som feiler etter `202`, siden konsumenten ikke får vite om det (meldingsstatus
+kommer i FFS-2337).
 Avvisninger på mottakergrensen er forventet i små mengder (en konsument som sender flere varsler til
 samme person), så de varsles først over 10 per time per tenant.
 
@@ -140,6 +154,51 @@ eller en mottakerliste har mange døde adresser.
 - Hvis en mottaker er blokkert ved en feil, fjernes blokkeringen med
   [driftsrutinen for blokkeringslisten](../README.md#driftsrutine-for-blokkeringslisten).
 
+## Meldinger feilet
+
+**Betyr:** en eller flere meldinger som fikk `202`, ble ikke sendt. Raden i køen er slettet, og
+meldingen sendes ikke på nytt av seg selv. Konsumenten får ikke vite det.
+
+**Finn årsaken:** søk i Loki etter `Melding feilet`. Linjen har meldings-ID, tenant, mal, antall
+forsøk, årsak og detalj (HTTP-status og ACS-feilkode), aldri adresse eller innhold.
+
+| `reason`            | Betyr                                                                                     | Gjør                                                                                                                      |
+|---------------------|-------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------|
+| `rejected`          | ACS avviste requesten (4xx), f.eks. ugyldig avsender eller domene som ikke er verifisert. | Gjelder det alle meldinger, er det konfig: sjekk `communication.email.sender` mot avsenderen i ACS. Ellers: se feilkoden. |
+| `operation-failed`  | ACS godtok requesten, men sendingen feilet, f.eks. `EmailDroppedAllRecipientsSuppressed`. | Mottakeren er undertrykt hos ACS (bounce eller avmelding). Kontakt teamet som eier konsumenten hvis det gjelder mange.    |
+| `retries-exhausted` | Alle forsøk (8, over ca. 2 timer) ga forbigående feil.                                    | Se [Køen står](#køen-står): ACS har trolig vært utilgjengelig, strupet trafikken eller avvist nøkkelen over lengre tid.   |
+
+Meldinger som har feilet, må sendes på nytt av konsumenten. Kontakt teamet som eier konsumenten med
+meldings-ID-ene fra loggen.
+
+## Køen står
+
+**Betyr:** den eldste meldingen i køen er over 15 minutter gammel. Meldinger sendes sent eller ikke
+i det hele tatt.
+
+**Finn årsaken:**
+
+- `communication_message_retried_total` per `reason` viser hvorfor sendingen feiler:
+  - `server-error`, `timeout` eller `io`: ACS er utilgjengelig eller treg.
+  - `throttled`: ACS struper trafikken. Køen tømmes av seg selv når ACS slipper til igjen.
+  - `unauthorized`: connection string er feil eller rotert. Sjekk
+    `COMMUNICATION_EMAIL_ACS_CONNECTION_STRING` i 1Password-itemet og restart podden.
+  - `unexpected` med `detalj=javax.crypto.AEADBadTagException`: meldingen kan ikke dekrypteres, fordi
+    `COMMUNICATION_DISPATCH_ENCRYPTION_KEY` er byttet eller feil. Rettes nøkkelen før forsøkene er brukt
+    opp, sendes meldingene; ellers feiler de med `retries-exhausted`.
+- I Loki: `Utsending feilet, prøver igjen` (med årsak og ACS-feilkode) og `Kunne ikke hente meldinger fra køen`
+  (databasen).
+- Ingen nye forsøk og ingen feil i loggen: sjekk at podden kjører. Køen ligger i databasen, så en
+  restart mister ingen meldinger; meldinger som var under sending, tas på nytt etter 5 minutter.
+- Status i køen direkte i `fint-common`:
+
+  ```sql
+  SELECT status, attempts, count(*), min(received_at), min(next_attempt_at)
+  FROM dispatch_queue
+  GROUP BY status, attempts
+  ORDER BY attempts;
+  ```
+
 ## Justere grenser
 
 Grensene ligger i `app/src/main/resources/application.yaml` under `communication.limits` og endres med
@@ -187,3 +246,32 @@ En konstruert overskridelse i beta, for å bekrefte at varslene i Grafana Alerts
    utnyttelsen for `NOVARI` er over 0.8, og at varslene «Tenantgrense nådd» og «Høy utnyttelse, tenant»
    går.
 4. Fjern overriden og deploy igjen.
+
+## Verifisere utsending
+
+Bekrefter at e-post går fra REST via mal og ACS til en reell adresse (akseptansekravet i FFS-1968).
+Forutsetter at ACS er slått på i miljøet (se [README](../README.md#slå-på-acs)).
+
+1. Åpne en port til tjenesten (den har ingen ingress):
+
+   ```bash
+   kubectl -n fintlabs-no port-forward deploy/fint-communication-service 8080:8080
+   ```
+
+2. Send testmalen med tenant `NOVARI` til en adresse du har tilgang til:
+
+   ```bash
+   curl -i -X POST localhost:8080/api/v1/messages -H 'Content-Type: application/json' -d '{"tenant":"NOVARI","message":{"channel":"EMAIL","to":"<din adresse>","templateId":"novari/test","variables":{"melding":"Verifisering av utsending"}}}'
+   ```
+
+3. Bekreft:
+   - svaret er `202` med en meldings-ID,
+   - loggen har `Melding mottatt` og `Melding sendt` med samme ID, og `status=SENT`,
+   - `communication_message_sent_total{tenant="NOVARI"}` har økt,
+   - e-posten har kommet fram, med avsender fra `communication.email.sender` og svaradresse
+     `no-reply@novari.no`.
+
+`Operation-Id` mot ACS er meldings-ID-en, så et nytt forsøk etter en timeout skal ikke gi to e-poster.
+ACS dokumenterer ikke hva som skjer ved gjentatt `Operation-Id`. Første gang loggen viser
+`årsak=timeout` fulgt av `Melding sendt` for samme ID, sjekk at mottakeren fikk én e-post, og oppdater
+dette avsnittet med resultatet.
