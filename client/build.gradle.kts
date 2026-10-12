@@ -24,7 +24,7 @@ dependencies {
     compileOnly("io.projectreactor:reactor-core")
 
     testImplementation(platform("org.springframework.boot:spring-boot-dependencies:$springBoot3Version"))
-    testImplementation(platform("com.fasterxml.jackson:jackson-bom:2.21.7"))
+    testImplementation(platform("com.fasterxml.jackson:jackson-bom:2.22.3"))
     testImplementation("org.springframework:spring-context")
     testImplementation("org.springframework:spring-web")
     testImplementation("org.springframework:spring-webflux")
@@ -36,7 +36,7 @@ dependencies {
 
     "testSpring7Implementation"(project(":model"))
     "testSpring7Implementation"(platform("org.springframework.boot:spring-boot-dependencies:$springBoot4Version"))
-    "testSpring7Implementation"(platform("tools.jackson:jackson-bom:3.1.7"))
+    "testSpring7Implementation"(platform("tools.jackson:jackson-bom:3.2.3"))
     "testSpring7Implementation"("org.springframework:spring-context")
     "testSpring7Implementation"("org.springframework:spring-web")
     "testSpring7Implementation"("org.springframework:spring-webflux")
