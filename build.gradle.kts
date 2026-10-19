@@ -11,13 +11,13 @@ repositories {
 }
 
 ktlint {
-    version.set("1.8.0")
+    version.set(libs.versions.ktlint.cli)
 }
 
 configurations.matching { it.name.startsWith("ktlint") }.configureEach {
     resolutionStrategy.eachDependency {
         if (requested.group == "ch.qos.logback") {
-            useVersion("1.5.38")
+            useVersion(libs.versions.logback.get())
         }
     }
 }

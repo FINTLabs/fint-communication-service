@@ -2,9 +2,6 @@ plugins {
     id("library-conventions")
 }
 
-val springBoot3Version = "3.5.16"
-val springBoot4Version = "4.1.1"
-
 val testSpring7 =
     sourceSets.create("testSpring7") {
         compileClasspath += sourceSets.main.get().output
@@ -18,13 +15,13 @@ kotlin.sourceSets.named("testSpring7") {
 dependencies {
     api(project(":model"))
 
-    compileOnly(platform("org.springframework.boot:spring-boot-dependencies:$springBoot3Version"))
+    compileOnly(platform(libs.spring.boot3.dependencies))
     compileOnly("org.springframework:spring-web")
     compileOnly("org.springframework:spring-webflux")
     compileOnly("io.projectreactor:reactor-core")
 
-    testImplementation(platform("org.springframework.boot:spring-boot-dependencies:$springBoot3Version"))
-    testImplementation(platform("com.fasterxml.jackson:jackson-bom:2.22.3"))
+    testImplementation(platform(libs.spring.boot3.dependencies))
+    testImplementation(platform(libs.jackson2.bom))
     testImplementation("org.springframework:spring-context")
     testImplementation("org.springframework:spring-web")
     testImplementation("org.springframework:spring-webflux")
@@ -35,8 +32,8 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 
     "testSpring7Implementation"(project(":model"))
-    "testSpring7Implementation"(platform("org.springframework.boot:spring-boot-dependencies:$springBoot4Version"))
-    "testSpring7Implementation"(platform("tools.jackson:jackson-bom:3.2.3"))
+    "testSpring7Implementation"(platform(libs.spring.boot.dependencies))
+    "testSpring7Implementation"(platform(libs.jackson3.bom))
     "testSpring7Implementation"("org.springframework:spring-context")
     "testSpring7Implementation"("org.springframework:spring-web")
     "testSpring7Implementation"("org.springframework:spring-webflux")
