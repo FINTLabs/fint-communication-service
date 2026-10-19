@@ -20,4 +20,19 @@ class DatabaseMigrationTest {
 
         assertThat(applied).contains("1")
     }
+
+    @Test
+    fun `send_usage has indexes for counting per recipient, per tenant and in total`() {
+        val indexes =
+            jdbcClient
+                .sql("SELECT indexname FROM pg_indexes WHERE tablename = 'send_usage'")
+                .query(String::class.java)
+                .list()
+
+        assertThat(indexes).contains(
+            "send_usage_recipient_sent_at",
+            "send_usage_tenant_sent_at",
+            "send_usage_sent_at",
+        )
+    }
 }

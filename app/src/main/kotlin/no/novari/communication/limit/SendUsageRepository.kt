@@ -27,6 +27,13 @@ class SendUsageRepository(
         acquireLock(jdbcClient.sql("SELECT pg_advisory_xact_lock(:key)").param("key", lockKey(recipient)))
     }
 
+    // To-int-varianten har et eget nøkkelrom i Postgres og kan ikke kollidere med mottakernøklene (bigint).
+    fun lockTotal() {
+        acquireLock(
+            jdbcClient.sql("SELECT pg_advisory_xact_lock(:namespace, 0)").param("namespace", TOTAL_LOCK_NAMESPACE),
+        )
+    }
+
     // Spring oversetter ikke lock_not_available, så uten dette ville lock timeout gitt 500 i stedet for 503.
     private fun acquireLock(statement: JdbcClient.StatementSpec) {
         try {
@@ -41,14 +48,23 @@ class SendUsageRepository(
         recipient: RecipientHash,
         since: Instant,
     ): List<Instant> =
+        sentTimes(since, "recipient_hash = :recipientHash AND", mapOf("recipientHash" to recipient.value))
+
+    fun tenantSentTimesSince(
+        tenant: Tenant,
+        since: Instant,
+    ): List<Instant> = sentTimes(since, "tenant = :tenant AND", mapOf("tenant" to tenant.name))
+
+    fun sentTimesSince(since: Instant): List<Instant> = sentTimes(since, "", emptyMap())
+
+    private fun sentTimes(
+        since: Instant,
+        filter: String,
+        params: Map<String, Any>,
+    ): List<Instant> =
         jdbcClient
-            .sql(
-                """
-                SELECT sent_at FROM send_usage
-                WHERE recipient_hash = :recipientHash AND sent_at > :since
-                ORDER BY sent_at
-                """.trimIndent(),
-            ).param("recipientHash", recipient.value)
+            .sql("SELECT sent_at FROM send_usage WHERE $filter sent_at > :since ORDER BY sent_at")
+            .params(params)
             .param("since", since.toOffsetDateTime())
             .query { rs, _ -> rs.getObject("sent_at", OffsetDateTime::class.java).toInstant() }
             .list()
@@ -83,6 +99,7 @@ class SendUsageRepository(
     private fun Instant.toOffsetDateTime(): OffsetDateTime = OffsetDateTime.ofInstant(this, ZoneOffset.UTC)
 
     private companion object {
+        const val TOTAL_LOCK_NAMESPACE = 1
         const val LOCK_NOT_AVAILABLE_SQL_STATE = "55P03"
     }
 }

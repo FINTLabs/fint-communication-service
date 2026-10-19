@@ -44,10 +44,8 @@ class GlobalExceptionHandler : ResponseEntityExceptionHandler() {
         }
         val problem =
             ProblemDetail
-                .forStatusAndDetail(
-                    HttpStatus.TOO_MANY_REQUESTS,
-                    "Mottakeren har fått for mange meldinger. Prøv igjen senere.",
-                ).apply { setProperty("limit", exception.type.value) }
+                .forStatusAndDetail(HttpStatus.TOO_MANY_REQUESTS, exception.type.detail)
+                .apply { setProperty("limit", exception.type.value) }
         return ResponseEntity
             .status(HttpStatus.TOO_MANY_REQUESTS)
             .header(HttpHeaders.RETRY_AFTER, retryAfterSeconds(exception.retryAfter).toString())
