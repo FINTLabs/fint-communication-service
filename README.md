@@ -15,28 +15,28 @@ Se [docs/architecture.md](docs/architecture.md) for arkitektur, dataflyt og sekv
 ## Status
 
 `POST /api/v1/messages` tar imot e-post basert på maler og svarer `202 Accepted` med en
-meldings-ID. Meldingen sendes ikke ennå. Databasen og mottaker-hashing er på plass, men ingen
-tabeller er tatt i bruk ennå. Layout, leverandøradapter og autentisering kommer i
+meldings-ID. Meldingen sendes ikke ennå. Hver mottaker kan få høyst 10 meldinger per time og 40
+per døgn (se [Grenser](#grenser)). Layout, leverandøradapter og autentisering kommer i
 egne oppgaver under [FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
 
 ## Moduler
 
-| Modul    | Innhold                                                        | Artifact                              |
-|----------|----------------------------------------------------------------|---------------------------------------|
-| `app`    | Spring Boot-tjenesten (API og motor). Deployes, releases ikke. | –                                     |
+| Modul    | Innhold                                                                                | Artifact                              |
+|----------|----------------------------------------------------------------------------------------|---------------------------------------|
+| `app`    | Spring Boot-tjenesten (API og motor). Deployes, releases ikke.                         | –                                     |
 | `model`  | API-kontrakten (request/response). Bare Jackson-annotasjoner, og bare ved kompilering. | `no.novari:fint-communication-model`  |
-| `client` | HTTP-klient for APIet, blokkerende og reactive.                | `no.novari:fint-communication-client` |
+| `client` | HTTP-klient for APIet, blokkerende og reactive.                                        | `no.novari:fint-communication-client` |
 
 `model` og `client` er kompilert for Java 21 og fungerer med både Spring Boot 3 og 4.
 
 ## Endepunkter
 
-| Endepunkt                     | Bruk                    |
-|-------------------------------|-------------------------|
-| `POST /api/v1/messages`       | Send melding            |
-| `/actuator/health`            | Startup-probe           |
-| `/actuator/health/liveness`   | Liveness-probe          |
-| `/actuator/health/readiness`  | Readiness-probe         |
+| Endepunkt                    | Bruk            |
+|------------------------------|-----------------|
+| `POST /api/v1/messages`      | Send melding    |
+| `/actuator/health`           | Startup-probe   |
+| `/actuator/health/liveness`  | Liveness-probe  |
+| `/actuator/health/readiness` | Readiness-probe |
 
 ## Sende melding
 
@@ -76,6 +76,38 @@ gjentar aldri verdiene som ble sendt inn.
   "detail": "Requesten inneholder ugyldige felt",
   "instance": "/api/v1/messages",
   "errors": [{ "field": "message.variables.antallFeil", "message": "kan ikke være lengre enn 6 tegn" }]
+}
+```
+
+## Grenser
+
+Tjenesten er et sikkerhetsnett over konsumentenes egne grenser: en mottaker skal ikke kunne få
+spam fra Novari, uansett hvilken tenant eller applikasjon som sender.
+
+| Grense       | Verdi | Vindu             |
+|--------------|-------|-------------------|
+| Per mottaker | 10    | Siste 60 minutter |
+| Per mottaker | 40    | Siste 24 timer    |
+
+- Mottakeren er adressen etter `trim` og små bokstaver, felles for alle tenants. `ola+test@rogfk.no`
+  er en annen mottaker enn `ola@rogfk.no`.
+- Bare meldinger som får `202`, teller. En avvist melding teller ikke.
+- Overskredet grense gir `429 Too Many Requests` med `Retry-After` (sekunder til neste melding kan
+  sendes) og `limit` som grensetype. Adressen gjentas ikke.
+- Er databasen utilgjengelig, avvises meldingen med `503` (fail-closed).
+- Høyere grenser for enkeltmottakere innføres først når fylket eller mottakeren uttrykkelig har gitt
+  tillatelse.
+
+```json
+HTTP/1.1 429
+Retry-After: 3000
+
+{
+  "title": "Too Many Requests",
+  "status": 429,
+  "detail": "Mottakeren har fått for mange meldinger. Prøv igjen senere.",
+  "instance": "/api/v1/messages",
+  "limit": "mottaker"
 }
 ```
 
@@ -132,10 +164,11 @@ med Jackson 2 (`:client:test`) og Spring Framework 7 med Jackson 3 (`:client:tes
 
 ## Konfigurasjon
 
-| Variabel                              | Innhold                                                                |
-|---------------------------------------|------------------------------------------------------------------------|
-| `fint.database.url`, `fint.database.username`, `fint.database.password` | Settes av Flais fra `spec.database` (`fint-common`). |
-| `COMMUNICATION_RECIPIENT_HASHING_KEY` | HMAC-nøkkel for mottaker-hashing, base64, minst 32 bytes. Fra 1Password. Oppstarten feiler uten den. |
+| Variabel                                                                            | Innhold                                                                                                                                            |
+|-------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `fint.database.url`, `fint.database.username`, `fint.database.password`             | Settes av Flais fra `spec.database` (`fint-common`).                                                                                               |
+| `COMMUNICATION_RECIPIENT_HASHING_KEY`                                               | HMAC-nøkkel for mottaker-hashing, base64, minst 32 bytes. Fra 1Password. Oppstarten feiler uten den.                                               |
+| `communication.limits.recipient.per-hour`, `communication.limits.recipient.per-day` | Grenser per mottaker (10 og 40) i `application.yaml`. Må være større enn 0, og `per-day` minst like stor som `per-hour`; ellers feiler oppstarten. |
 
 Ny nøkkel lages med `openssl rand -base64 32`. Bytter man nøkkel, kjenner tjenesten ikke lenger igjen
 mottakere som er lagret fra før; se [Database](docs/architecture.md#database).
@@ -177,6 +210,26 @@ val response =
 
 For reactive applikasjoner: `CommunicationClients.createReactive(webClient)`, som returnerer
 `Mono<MessageAcceptedResponse>`.
+
+### Feil fra tjenesten
+
+Klienten kaster Springs vanlige unntak: `RestClientResponseException` (blokkerende) og
+`WebClientResponseException` (reactive), med ProblemDetail i bodyen. `429` betyr at mottakeren har
+nådd en grense (se [Grenser](#grenser)). Meldingen er ikke lagret, og den bør enten droppes eller
+sendes på nytt etter `Retry-After`. Ikke prøv på nytt i en løkke.
+
+```kotlin
+try {
+    client.send(request)
+} catch (e: HttpClientErrorException.TooManyRequests) {
+    val retryAfterSeconds = e.responseHeaders?.getFirst(HttpHeaders.RETRY_AFTER)?.toLongOrNull()
+    val limit = e.getResponseBodyAs(ProblemDetail::class.java)?.properties?.get("limit")
+    // f.eks. logg og dropp, eller planlegg nytt forsøk etter retryAfterSeconds
+}
+```
+
+For `WebClient` er tilsvarende unntak `WebClientResponseException.TooManyRequests`. `503` betyr at
+tjenesten er midlertidig utilgjengelig og kan prøves på nytt senere.
 
 ## Release av bibliotekene
 

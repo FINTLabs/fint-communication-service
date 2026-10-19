@@ -2,7 +2,7 @@ package no.novari.communication.message.domain
 
 data class EmailPayload(
     override val templateId: String,
-    val to: String,
+    override val to: String,
     val subject: String,
     val body: String,
     val replyTo: String? = null,

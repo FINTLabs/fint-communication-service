@@ -1,11 +1,17 @@
 package no.novari.communication.api
 
+import no.novari.communication.TEST_RECIPIENT_HASHING_KEY
 import no.novari.communication.api.validation.SendMessageRequestValidator
+import no.novari.communication.limit.LimitExceededException
+import no.novari.communication.limit.LimitType
+import no.novari.communication.limit.SendLimiter
 import no.novari.communication.message.MessageService
 import no.novari.communication.message.dispatch.MessageDispatcher
 import no.novari.communication.message.domain.EmailPayload
 import no.novari.communication.message.domain.OutgoingMessage
 import no.novari.communication.model.Tenant
+import no.novari.communication.recipient.RecipientHash
+import no.novari.communication.recipient.RecipientHasher
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -14,13 +20,17 @@ import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
+import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
+import org.springframework.jdbc.CannotGetJdbcConnectionException
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.get
 import org.springframework.test.web.servlet.post
 import java.time.Clock
+import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.Base64
 
 @WebMvcTest(MessageController::class)
 @Import(SendMessageRequestValidator::class, MessageService::class, MessageControllerTest.TestBeans::class)
@@ -31,10 +41,14 @@ class MessageControllerTest {
     @Autowired
     lateinit var dispatcher: RecordingDispatcher
 
+    @Autowired
+    lateinit var sendLimiter: ControllableSendLimiter
+
     @BeforeEach
     fun reset() {
         dispatcher.dispatched.clear()
         dispatcher.failure = null
+        sendLimiter.failure = null
     }
 
     @Test
@@ -187,6 +201,49 @@ class MessageControllerTest {
         }
     }
 
+    @Test
+    fun `a message over the limit is rejected with retry-after and without the address`() {
+        sendLimiter.failure = { message ->
+            LimitExceededException(LimitType.RECIPIENT, message.tenant, message.id, Duration.ofMillis(2_500_001))
+        }
+
+        postJson(VALID_REQUEST).andExpect {
+            status { isTooManyRequests() }
+            header { string(HttpHeaders.RETRY_AFTER, "2501") }
+            content { contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON) }
+            jsonPath("$.status") { value(429) }
+            jsonPath("$.detail") { value("Mottakeren har fått for mange meldinger. Prøv igjen senere.") }
+            jsonPath("$.limit") { value("mottaker") }
+            jsonPath("$.instance") { value(MessageController.MESSAGES_PATH) }
+            content { string(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("ola@rogfk.no"))) }
+        }
+        assertThat(dispatcher.dispatched).isEmpty()
+    }
+
+    @Test
+    fun `retry-after is at least one second`() {
+        sendLimiter.failure = { message ->
+            LimitExceededException(LimitType.RECIPIENT, message.tenant, message.id, Duration.ofMillis(1))
+        }
+
+        postJson(VALID_REQUEST).andExpect {
+            status { isTooManyRequests() }
+            header { string(HttpHeaders.RETRY_AFTER, "1") }
+        }
+    }
+
+    @Test
+    fun `an unavailable database returns service unavailable`() {
+        sendLimiter.failure = { CannotGetJdbcConnectionException("Failed to obtain JDBC Connection") }
+
+        postJson(VALID_REQUEST).andExpect {
+            status { isServiceUnavailable() }
+            content { contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON) }
+            jsonPath("$.detail") { value("Tjenesten er midlertidig utilgjengelig") }
+        }
+        assertThat(dispatcher.dispatched).isEmpty()
+    }
+
     private fun postJson(json: String) =
         mockMvc.post(MessageController.MESSAGES_PATH) {
             contentType = MediaType.APPLICATION_JSON
@@ -203,6 +260,17 @@ class MessageControllerTest {
         }
     }
 
+    class ControllableSendLimiter : SendLimiter {
+        var failure: ((OutgoingMessage) -> RuntimeException)? = null
+
+        override fun checkAndRecord(
+            message: OutgoingMessage,
+            recipient: RecipientHash,
+        ) {
+            failure?.let { throw it(message) }
+        }
+    }
+
     @TestConfiguration
     class TestBeans {
         @Bean
@@ -210,6 +278,12 @@ class MessageControllerTest {
 
         @Bean
         fun recordingDispatcher() = RecordingDispatcher()
+
+        @Bean
+        fun controllableSendLimiter() = ControllableSendLimiter()
+
+        @Bean
+        fun recipientHasher() = RecipientHasher(Base64.getDecoder().decode(TEST_RECIPIENT_HASHING_KEY))
 
         @Bean
         fun clock(): Clock = Clock.fixed(NOW, ZoneOffset.UTC)
