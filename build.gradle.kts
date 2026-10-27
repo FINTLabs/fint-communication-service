@@ -10,6 +10,10 @@ repositories {
     mavenCentral()
 }
 
+dependencyLocking {
+    lockAllConfigurations()
+}
+
 ktlint {
     version.set(libs.versions.ktlint.cli)
 }

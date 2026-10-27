@@ -6,6 +6,10 @@ repositories {
     gradlePluginPortal()
 }
 
+dependencyLocking {
+    lockAllConfigurations()
+}
+
 dependencies {
     implementation(libs.kotlin.gradle.plugin)
     implementation(libs.kotlin.allopen)
