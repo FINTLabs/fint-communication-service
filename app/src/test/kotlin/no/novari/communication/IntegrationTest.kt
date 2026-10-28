@@ -1,5 +1,6 @@
 package no.novari.communication
 
+import org.springframework.boot.micrometer.metrics.test.autoconfigure.AutoConfigureMetrics
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.context.annotation.Import
 
@@ -9,4 +10,5 @@ const val TEST_RECIPIENT_HASHING_KEY = "dGVzdC1ub2trZWwtZm9yLW1vdHRha2VyLWhhc2hp
 @Retention(AnnotationRetention.RUNTIME)
 @SpringBootTest(properties = ["communication.recipient-hashing.key=$TEST_RECIPIENT_HASHING_KEY"])
 @Import(TestcontainersConfiguration::class, IntegrationTestConfiguration::class)
+@AutoConfigureMetrics
 annotation class IntegrationTest
