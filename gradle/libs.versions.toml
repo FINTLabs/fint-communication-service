@@ -14,7 +14,7 @@ tomcat = "11.0.27"
 httpclient5 = "5.6.5"
 httpcore5 = "5.4.4"
 commons-lang3 = "3.21.0"
-junit = "6.1.2"
+junit = "6.1.3"
 kotlin-logging = "8.0.4"
 
 [libraries]
