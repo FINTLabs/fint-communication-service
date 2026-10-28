@@ -39,6 +39,7 @@ communication:
     total:
       per-hour: 500
       per-day: 2000
+    usage-refresh: 60s
   retention:
     metadata: 60d
     cleanup-cron: "0 15 3 * * *"

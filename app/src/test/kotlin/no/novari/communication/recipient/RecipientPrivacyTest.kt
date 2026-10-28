@@ -5,6 +5,7 @@ import no.novari.communication.IntegrationTest
 import no.novari.communication.TEST_RECIPIENT_HASHING_KEY
 import no.novari.communication.blocklist.RecipientBlockedException
 import no.novari.communication.limit.LimitExceededException
+import no.novari.communication.limit.LimitUsageMetrics
 import no.novari.communication.message.MessageService
 import no.novari.communication.message.domain.EmailPayload
 import no.novari.communication.model.Tenant
@@ -41,6 +42,9 @@ class RecipientPrivacyTest {
     lateinit var messageService: MessageService
 
     @Autowired
+    lateinit var usageMetrics: LimitUsageMetrics
+
+    @Autowired
     lateinit var webApplicationContext: WebApplicationContext
 
     @BeforeEach
@@ -59,6 +63,7 @@ class RecipientPrivacyTest {
             ).param("hash", hasher.hash(BLOCKED_ADDRESS).value)
             .update()
         assertThatThrownBy { send(BLOCKED_ADDRESS) }.isInstanceOf(RecipientBlockedException::class.java)
+        usageMetrics.refresh()
     }
 
     @Test
@@ -107,7 +112,7 @@ class RecipientPrivacyTest {
     }
 
     @Test
-    fun `the prometheus scrape has the blocklist counter per tenant but neither address nor hash`() {
+    fun `the prometheus scrape has the limit and blocklist metrics per tenant but neither address nor hash`() {
         val scrape =
             MockMvcBuilders
                 .webAppContextSetup(webApplicationContext)
@@ -117,7 +122,12 @@ class RecipientPrivacyTest {
                 .andReturn()
                 .response.contentAsString
 
-        assertThat(scrape).containsPattern("""communication_blocklist_rejected_total\{[^}]*tenant="ROGALAND"""")
+        assertThat(scrape)
+            .containsPattern("""communication_blocklist_rejected_total\{[^}]*tenant="ROGALAND"""")
+            .containsPattern("""communication_limit_rejected_total\{limit="mottaker",tenant="ROGALAND"}""")
+            .containsPattern("""communication_message_accepted_total\{channel="EMAIL",tenant="ROGALAND"}""")
+            .containsPattern("""communication_limit_tenant_usage_ratio\{tenant="ROGALAND",window="hour"}""")
+            .containsPattern("""communication_limit_total_usage_ratio\{window="day"}""")
         ADDRESSES.forEach { address ->
             assertThat(scrape)
                 .doesNotContainIgnoringCase(address.trim())
