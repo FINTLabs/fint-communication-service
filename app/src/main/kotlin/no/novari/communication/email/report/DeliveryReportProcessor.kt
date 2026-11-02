@@ -23,7 +23,7 @@ class DeliveryReportProcessor(
                 val outcome = applyStatus(report)
                 val blockReason = report.event.blocks
                 val recipient = report.recipient?.takeIf { blockReason != null }
-                recipient?.let { block(it, blockReason, report) }
+                if (recipient != null && blockReason != null) block(recipient, blockReason, report)
                 ProcessedReport(
                     report = report,
                     message =
@@ -40,7 +40,7 @@ class DeliveryReportProcessor(
 
     private fun block(
         recipient: RecipientHash,
-        reason: BlockReason?,
+        reason: BlockReason,
         report: DeliveryReport,
     ) {
         when (reason) {
@@ -54,10 +54,6 @@ class DeliveryReportProcessor(
 
             BlockReason.OPT_OUT -> {
                 blocklist.blockOptOut(recipient, BlockSource.SES)
-            }
-
-            null -> {
-                Unit
             }
         }
     }

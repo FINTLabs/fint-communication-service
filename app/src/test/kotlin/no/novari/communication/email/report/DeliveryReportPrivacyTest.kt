@@ -78,7 +78,10 @@ class DeliveryReportPrivacyTest {
             ).replace("\"eventType\"", "\"ikke-gyldig\": $ADDRESS, \"x\""),
         )
 
-        poller.poll()
+        repeat(MAX_POLLS) {
+            poller.poll()
+            if (queueSize() == "0") return@repeat
+        }
         queueMetrics.refresh()
     }
 
@@ -91,12 +94,7 @@ class DeliveryReportPrivacyTest {
                 .query(Long::class.java)
                 .single(),
         ).isEqualTo(2L)
-        assertThat(
-            sqs
-                .getQueueAttributes {
-                    it.queueUrl(queueUrl.value).attributeNames(QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES)
-                }.attributes()[QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES],
-        ).isEqualTo("0")
+        assertThat(queueSize()).isEqualTo("0")
     }
 
     @Test
@@ -189,6 +187,12 @@ class DeliveryReportPrivacyTest {
         sqs.sendMessage { it.queueUrl(queueUrl.value).messageBody(DeliveryReportEvents.sns(event)) }
     }
 
+    private fun queueSize(): String? =
+        sqs
+            .getQueueAttributes {
+                it.queueUrl(queueUrl.value).attributeNames(QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES)
+            }.attributes()[QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES]
+
     private fun textColumns(): List<Pair<String, String>> =
         jdbcClient
             .sql(
@@ -202,6 +206,7 @@ class DeliveryReportPrivacyTest {
             .list()
 
     private companion object {
+        const val MAX_POLLS = 5
         const val ADDRESS = "Personvern.Rapport@Rogfk.no"
         const val STATUS_MESSAGE = "550 5.1.1 Personvern.Rapport@Rogfk.no: mailbox unavailable"
     }

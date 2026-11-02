@@ -98,7 +98,7 @@ class DeliveryReportIntegrationTest {
         val before = listOf("BOUNCED", "FAILED", "COMPLAINED").associateWith(::received)
         sent.forEach { (event, message) -> enqueue(event(message.second, event.value, message.first)) }
 
-        poller.poll()
+        pollUntilEmpty()
 
         sent.forEach { (event, message) ->
             val (address, id) = message
@@ -119,10 +119,10 @@ class DeliveryReportIntegrationTest {
         val address = nextRecipient()
         val id = sendAndDispatch(address)
         enqueue(event(id, "Delivery", address))
-        poller.poll()
+        pollUntilEmpty()
 
         enqueue(event(id, "Complaint", address))
-        poller.poll()
+        pollUntilEmpty()
 
         assertThat(stored(id).status).isEqualTo(MessageStatus.DELIVERED)
         assertThat(blocklistReason(address)).isEqualTo("OPT_OUT")
@@ -135,7 +135,7 @@ class DeliveryReportIntegrationTest {
         val address = nextRecipient()
         enqueue(event(sendAndDispatch(address), "Bounce/Permanent", address))
 
-        poller.poll()
+        pollUntilEmpty()
 
         assertThat(blocklistSource(address)).isEqualTo("SES")
         assertThat(runCatching { send(address) }.exceptionOrNull())
@@ -164,13 +164,13 @@ class DeliveryReportIntegrationTest {
         val id = sendAndDispatch(address)
         val event = event(id, "Bounce/Permanent", address)
         enqueue(event)
-        poller.poll()
+        pollUntilEmpty()
         val first = stored(id)
         val firstExpiry = blocklistExpiry(address)
 
         clock.advance(Duration.ofHours(1))
         enqueue(event)
-        poller.poll()
+        pollUntilEmpty()
 
         assertThat(stored(id)).isEqualTo(first)
         assertThat(blocklistExpiry(address)).isEqualTo(firstExpiry)
@@ -182,10 +182,10 @@ class DeliveryReportIntegrationTest {
         val address = nextRecipient()
         val id = sendAndDispatch(address)
         enqueue(event(id, "Delivery", address))
-        poller.poll()
+        pollUntilEmpty()
 
         enqueue(event(id, "Bounce/Transient", address))
-        poller.poll()
+        pollUntilEmpty()
 
         assertThat(stored(id).status).isEqualTo(MessageStatus.DELIVERED)
         assertThat(stored(id).failureReason).isNull()
@@ -197,7 +197,7 @@ class DeliveryReportIntegrationTest {
         val id = send(address)
         emailAdapter.beforeNextResponse {
             enqueue(event(id, "Delivery", address))
-            poller.poll()
+            pollUntilEmpty()
         }
 
         dispatchWorker.processDue()
@@ -213,7 +213,7 @@ class DeliveryReportIntegrationTest {
         emailAdapter.respondWith(EmailSendOutcome.Retryable(RetryReason.TIMEOUT, "ingen sluttstatus"))
         emailAdapter.beforeNextResponse {
             enqueue(event(id, "Bounce/Permanent", address))
-            poller.poll()
+            pollUntilEmpty()
         }
 
         dispatchWorker.processDue()
@@ -233,7 +233,7 @@ class DeliveryReportIntegrationTest {
         enqueue(event(MessageId.generate(), "Bounce/Permanent", bounced))
         enqueue(event(MessageId.generate(), "Delivery", delivered))
 
-        poller.poll()
+        pollUntilEmpty()
 
         assertThat(blocklistExpiry(bounced)).isEqualTo(OCCURRED_AT + Duration.ofDays(30))
         assertThat(blocklistExpiry(delivered)).isNull()
@@ -257,12 +257,12 @@ class DeliveryReportIntegrationTest {
             .update()
 
         enqueue(event(MessageId.generate(), "Bounce/Permanent", address))
-        poller.poll()
+        pollUntilEmpty()
         assertThat(blocklistExpiry(address)).isEqualTo(manualExpiry)
 
         val later = OCCURRED_AT + Duration.ofDays(20)
         enqueue(event(MessageId.generate(), "Bounce/Suppressed", address, later))
-        poller.poll()
+        pollUntilEmpty()
 
         assertThat(blocklistExpiry(address)).isEqualTo(later + Duration.ofDays(30))
         assertThat(
@@ -280,7 +280,7 @@ class DeliveryReportIntegrationTest {
         val id = sendAndDispatch(address)
         sendToQueue(event(id, "Delivery", address))
 
-        poller.poll()
+        pollUntilEmpty()
 
         assertThat(stored(id).status).isEqualTo(MessageStatus.DELIVERED)
     }
@@ -301,7 +301,7 @@ class DeliveryReportIntegrationTest {
             Thread.sleep(VISIBILITY.plusMillis(200).toMillis())
         }
 
-        poller.poll()
+        pollUntilEmpty()
 
         assertThat(stored(id).status).isEqualTo(MessageStatus.SENT)
         assertThat(discarded(DiscardReason.POISON) - before).isEqualTo(1.0)
@@ -314,7 +314,7 @@ class DeliveryReportIntegrationTest {
         enqueue("{ikke json")
         enqueue(DeliveryReportEvents.sesEvent(MessageId.generate(), "Open"))
 
-        poller.poll()
+        pollUntilEmpty()
 
         assertThat(discarded(DiscardReason.INVALID) - before.first).isEqualTo(1.0)
         assertThat(discarded(DiscardReason.UNSUPPORTED_TYPE) - before.second).isEqualTo(1.0)
@@ -343,6 +343,13 @@ class DeliveryReportIntegrationTest {
 
     private fun sendToQueue(body: String) {
         sqs.sendMessage { it.queueUrl(queueUrl.value).messageBody(body) }
+    }
+
+    private fun pollUntilEmpty() {
+        repeat(MAX_POLLS) {
+            poller.poll()
+            if (queueSize() == 0L) return
+        }
     }
 
     private fun queueSize(): Long =
@@ -420,5 +427,6 @@ class DeliveryReportIntegrationTest {
         val START: Instant = Instant.parse("2026-10-12T08:00:00Z")
         val OCCURRED_AT: Instant = Instant.parse("2026-10-12T08:00:30.123456Z")
         val VISIBILITY: Duration = Duration.ofSeconds(1)
+        const val MAX_POLLS = 5
     }
 }
