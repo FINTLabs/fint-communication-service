@@ -2,8 +2,8 @@
 # Manual edits can break the build and are not advised.
 # This file is expected to be part of source control.
 # To regenerate this file, run: ./gradlew :client:dependencies --write-locks
-ch.qos.logback:logback-classic:1.6.5=ktlint
-ch.qos.logback:logback-core:1.6.5=ktlint
+ch.qos.logback:logback-classic:1.6.6=ktlint
+ch.qos.logback:logback-core:1.6.6=ktlint
 com.fasterxml.jackson.core:jackson-annotations:2.22=testCompileClasspath,testRuntimeClasspath,testSpring7CompileClasspath,testSpring7RuntimeClasspath
 com.fasterxml.jackson.core:jackson-core:2.22.4=testCompileClasspath,testRuntimeClasspath
 com.fasterxml.jackson.core:jackson-databind:2.22.4=testCompileClasspath,testRuntimeClasspath
