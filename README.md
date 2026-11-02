@@ -21,7 +21,9 @@ konfigurert (se [Utsending](#utsending)). Status for meldingen slås opp med
 per døgn (se [Grenser](#grenser)), og mottakere som har meldt seg av eller hard-bouncet, avvises
 (se [Blokkeringsliste](#blokkeringsliste)). Amazon SES er klar i koden, men kontoen og domenet
 finnes ikke ennå, så alle miljøer bruker foreløpig leverandøren `logging`, som logger og forkaster
-meldingen. Layout og autentisering kommer i egne oppgaver under
+meldingen. Leveringsrapportene fra SES (levert, bounce, klage) gir sluttstatus og blokkerer adresser
+som bouncer eller klager, men mottaket er slått av til køen finnes (se
+[Leveringsrapporter](#leveringsrapporter)). Layout og autentisering kommer i egne oppgaver under
 [FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
 
 ## Moduler
@@ -102,24 +104,29 @@ gjentar aldri verdiene som ble sendt inn.
 }
 ```
 
-| `status`   | Betyr                                                                                                                          |
-|------------|--------------------------------------------------------------------------------------------------------------------------------|
-| `RECEIVED` | Akseptert og lagt i køen, men ikke sendt ennå. Gjelder også mens tjenesten venter på et nytt forsøk etter en forbigående feil. |
-| `SENT`     | Leverandøren har tatt imot meldingen for levering. Det betyr ikke at den er levert til mottakeren.                             |
-| `FAILED`   | Meldingen ble ikke sendt, og tjenesten prøver ikke igjen. `failureReason` sier hvorfor.                                        |
+| `status`     | Betyr                                                                                                                                     |
+|--------------|-------------------------------------------------------------------------------------------------------------------------------------------|
+| `RECEIVED`   | Akseptert og lagt i køen, men ikke sendt ennå. Gjelder også mens tjenesten venter på et nytt forsøk etter en forbigående feil.            |
+| `SENT`       | SES har tatt imot meldingen for levering. Det betyr ikke at den er levert til mottakeren.                                                 |
+| `DELIVERED`  | Mottakerens e-postserver har tatt imot meldingen (leveringsrapport).                                                                      |
+| `BOUNCED`    | Adressen eller domenet finnes ikke (hard bounce). Mottakeren blokkeres i 30 dager.                                                        |
+| `SUPPRESSED` | SES sendte ikke, fordi adressen står på SES sin suppression-liste etter en tidligere bounce eller klage. Mottakeren blokkeres i 30 dager. |
+| `FAILED`     | Meldingen ble ikke sendt eller ikke levert, og tjenesten prøver ikke igjen. `failureReason` sier hvorfor.                                 |
 
-| `failureReason`     | Betyr                                              | Nytt forsøk                |
-|---------------------|----------------------------------------------------|----------------------------|
-| `REJECTED`          | Leverandøren avviste meldingen.                    | Hjelper ikke uten endring. |
-| `RETRIES_EXHAUSTED` | Forbigående feil i alle 8 forsøkene (ca. 2 timer). | Kan sendes på nytt senere. |
+| `failureReason`     | Betyr                                                                             | Nytt forsøk                |
+|---------------------|-----------------------------------------------------------------------------------|----------------------------|
+| `REJECTED`          | SES avviste meldingen, ved sending eller etterpå (f.eks. virus i innholdet).      | Hjelper ikke uten endring. |
+| `RETRIES_EXHAUSTED` | Forbigående feil i alle 8 forsøkene (ca. 2 timer).                                | Kan sendes på nytt senere. |
+| `DELIVERY_FAILED`   | SES sendte meldingen, men den ble ikke levert (soft bounce, f.eks. full innboks). | Kan sendes på nytt senere. |
 
 `failureReason` er `null` når status ikke er `FAILED`. `updatedAt` er når status sist ble endret.
 Svaret har aldri mottaker, mal, emne eller innhold, og det er ingen tenant-sjekk. Ukjent ID, eller en
 melding som er slettet etter 60 dager, gir `404`. En ID som ikke er en UUID, gir `400`.
 
-Leveringsrapportene fra leverandøren (levert, bounce, klage) kommer asynkront, sekunder til
-minutter etter `SENT`. De blir egne statuser når leveringsrapportene er på plass; til da er `SENT` den siste statusen for en
-melding som gikk gjennom.
+`DELIVERED`, `BOUNCED`, `SUPPRESSED` og `FAILED` med `DELIVERY_FAILED` eller `REJECTED` kan komme fra
+leveringsrapportene fra SES, sekunder til minutter etter `SENT` (se
+[Leveringsrapporter](#leveringsrapporter)). De er endelige: den første rapporten gjelder. Så lenge
+mottaket er slått av, er `SENT` den siste statusen for en melding som gikk gjennom.
 
 ## Grenser
 
@@ -201,10 +208,10 @@ Retry-After: 3000
 Mottakere som har meldt seg av (`OPT_OUT`) eller hard-bouncet (`HARD_BOUNCE`), får ikke e-post fra
 tjenesten. Listen er felles for alle tenants og sjekkes ved innsending, før grensene.
 
-| Årsak         | Varighet                   | Legges inn av                                                                    |
-|---------------|----------------------------|----------------------------------------------------------------------------------|
-| `OPT_OUT`     | Til den fjernes manuelt.   | [Driftsrutinen](#driftsrutine-for-blokkeringslisten).                            |
-| `HARD_BOUNCE` | 30 dager fra siste bounce. | Driftsrutinen. Senere automatisk fra leveringsrapportene til e-postleverandøren. |
+| Årsak         | Varighet                   | Legges inn av                                                                                                  |
+|---------------|----------------------------|----------------------------------------------------------------------------------------------------------------|
+| `OPT_OUT`     | Til den fjernes manuelt.   | [Driftsrutinen](#driftsrutine-for-blokkeringslisten), og automatisk når mottakeren klager (markerer som spam). |
+| `HARD_BOUNCE` | 30 dager fra siste bounce. | Driftsrutinen, og automatisk fra [leveringsrapportene](#leveringsrapporter) (permanent bounce).                |
 
 - Mottakeren kjennes igjen på samme måte som for grensene: adressen etter `trim` og små bokstaver.
 - En blokkert mottaker gir `422 Unprocessable Content`. Svaret sier ikke om årsaken er opt-out eller
@@ -365,6 +372,38 @@ vises først i leveringsrapportene.
 - **Konto i pause:** setter AWS sendingen på pause (f.eks. for høy bounce-rate), regnes svaret som
   forbigående (`unauthorized`), og meldingene sendes når pausen er opphevet, innen forsøkene er brukt opp.
 
+## Leveringsrapporter
+
+SES publiserer hendelser for hver e-post via configuration set-et til et SNS-topic, som leverer dem
+til SQS-køen `email-delivery-reports`. Tjenesten henter dem hvert 10. sekund, både med SNS-konvolutt
+og som rå hendelser (raw message delivery). Mottaket er slått av som default og i beta, siden køen
+ikke finnes ennå; se [Slå på leveringsrapporter](#slå-på-leveringsrapporter).
+
+| Hendelse fra SES                          | Status                       | Blokkering               |
+|-------------------------------------------|------------------------------|--------------------------|
+| `Delivery`                                | `DELIVERED`                  | –                        |
+| `Bounce`, permanent                       | `BOUNCED`                    | `HARD_BOUNCE` i 30 dager |
+| `Bounce`, permanent, på suppression-liste | `SUPPRESSED`                 | `HARD_BOUNCE` i 30 dager |
+| `Bounce`, forbigående eller ukjent        | `FAILED` (`DELIVERY_FAILED`) | –                        |
+| `Reject`                                  | `FAILED` (`REJECTED`)        | –                        |
+| `Complaint`                               | Uendret                      | `OPT_OUT`                |
+
+- Hendelsen knyttes til meldingen med taggen `messageId`, som tjenesten setter ved sending.
+- En rapport endrer bare en melding som er `RECEIVED` eller `SENT`; den første rapporten gjelder, og
+  samme rapport to ganger gir samme resultat. En klage kommer etter `Delivery` og endrer derfor ikke
+  status, men blokkerer mottakeren.
+- Blokkeringen ved bounce gjelder i 30 dager fra tidspunktet i rapporten. Den forlenger en eksisterende
+  blokkering, men forkorter den aldri, og en opt-out berøres ikke. En klage blir en opt-out som gjelder
+  til den fjernes manuelt. Blokkeringen skrives også når meldingen er ukjent (f.eks. slettet etter 60
+  dager), siden adressen står i rapporten.
+- Adressen i rapporten hashes med en gang og lagres, logges eller telles aldri i klartekst.
+- En rapport slettes fra køen først når den er lagret. Rapporter som ikke kan leses, andre
+  hendelsestyper (f.eks. `Send`, `DeliveryDelay`, `Open`) og rapporter som er hentet 5 ganger, logges
+  uten innhold, telles og slettes. Configuration set-et bør derfor bare publisere `Delivery`,
+  `Bounce`, `Complaint` og `Reject`.
+- Er køen utilgjengelig, logges og telles det, og tjenesten fortsetter som før. Køen er ikke med i
+  helsesjekkene, så tjenesten tar fortsatt imot meldinger.
+
 ## Lokal utvikling
 
 Krever Java 25 og Docker. Testene og lokal kjøring starter Postgres med Testcontainers.
@@ -381,7 +420,9 @@ med Jackson 2 (`:client:test`) og Spring Framework 7 med Jackson 3 (`:client:tes
 ```
 
 `bootTestRun` starter appen med en Postgres-container og testnøkler for mottaker-hashing og
-kryptering av køen. Leverandøren er `logging`, så ingenting sendes. Testmalen viser hele flyten:
+kryptering av køen. Leverandøren er `logging`, så ingenting sendes, og mottaket av
+leveringsrapporter er slått av. Testene for leveringsrapportene bruker en ElasticMQ-container
+(SQS-kompatibel) med ekte køer. Testmalen viser hele flyten:
 
 ```bash
 curl -i -X POST localhost:8080/api/v1/messages -H 'Content-Type: application/json' -d '{"tenant":"NOVARI","message":{"channel":"EMAIL","to":"test@novari.no","templateId":"novari/test","variables":{"melding":"Hei"}}}'
@@ -405,7 +446,15 @@ Loggen er JSON, også lokalt og i testene. Lesbar tekst får man med et tomt for
 | `communication.email.provider`                                                                                        | `logging` (default) eller `ses`. Ukjent verdi stopper oppstarten.                                                                 |
 | `communication.email.sender`                                                                                          | Avsenderadressen. Påkrevd med `ses`, og domenet må være verifisert i SES.                                                         |
 | `communication.email.ses.region`                                                                                      | AWS-regionen til SES. `eu-north-1` (Stockholm) i `application.yaml`.                                                              |
-| `communication.email.ses.configuration-set`                                                                           | Configuration set i SES. Valgfri; trengs for leveringsrapporter.                                                                  |
+| `communication.email.ses.configuration-set`                                                                           | Configuration set i SES. Påkrevd for leveringsrapporter.                                                                          |
+| `communication.email.delivery-reports.enabled`                                                                        | Mottak av leveringsrapporter. `false` (default).                                                                                  |
+| `communication.email.delivery-reports.queue-url`                                                                      | URL-en til SQS-køen med rapportene. Påkrevd når mottaket er slått på.                                                             |
+| `communication.email.delivery-reports.region`                                                                         | AWS-regionen til køen. `eu-north-1` (default).                                                                                    |
+| `communication.email.delivery-reports.poll-interval`, `communication.email.delivery-reports.batch-size`               | Hvor ofte køen sjekkes (`10s`) og hvor mange rapporter som hentes om gangen (`10`, høyst 10).                                     |
+| `communication.email.delivery-reports.visibility-timeout`                                                             | Hvor lenge en hentet rapport er usynlig for andre før den kan hentes på nytt (`5m`).                                              |
+| `communication.email.delivery-reports.max-receive-count`                                                              | Antall ganger en rapport kan hentes før den forkastes som poison (`5`).                                                           |
+| `communication.email.delivery-reports.block-for`                                                                      | Hvor lenge en bounce blokkerer mottakeren, regnet fra tidspunktet i rapporten (`30d`).                                            |
+| `communication.email.delivery-reports.queue-metrics-refresh`                                                          | Hvor ofte lengden på rapportkøen leses (`60s`).                                                                                   |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`                                                                          | Nøkler til IAM-brukeren som sender. Fra 1Password. Påkrevd med `ses`.                                                             |
 | `communication.dispatch.poll-interval`, `communication.dispatch.batch-size`                                           | Hvor ofte køen sjekkes (`2s`) og hvor mange meldinger som hentes om gangen (`10`).                                                |
 | `communication.dispatch.lease`                                                                                        | Hvor lenge en melding er reservert av en pod før en annen kan ta den (`5m`).                                                      |
@@ -525,26 +574,32 @@ Opprett en GitHub-release med tag `vX.Y.Z`. `Publish to Reposilite`-workflowen p
 ## Drift og varsling
 
 Tjenesten publiserer disse metrikkene på `/actuator/prometheus`, i tillegg til Spring Boots egne. Ingen
-av dem har adresse eller hash som tag.
+av dem har adresse eller hash som tag. Metrikkene for leveringsrapporter finnes bare når mottaket er
+slått på.
 
-| Metrikk                                       | Tagger                                            | Betydning                                                |
-|-----------------------------------------------|---------------------------------------------------|----------------------------------------------------------|
-| `communication_message_accepted_total`        | `tenant`, `channel`                               | Aksepterte meldinger (`202`).                            |
-| `communication_limit_rejected_total`          | `limit` (`mottaker`, `tenant`, `total`), `tenant` | Meldinger avvist av en grense (`429`).                   |
-| `communication_blocklist_rejected_total`      | `tenant`                                          | Meldinger avvist fordi mottakeren er blokkert (`422`).   |
-| `communication_limit_tenant_usage_ratio`      | `tenant`, `window` (`hour`, `day`)                | Forbruk delt på tenantgrensen, siste time og siste døgn. |
-| `communication_limit_total_usage_ratio`       | `window` (`hour`, `day`)                          | Forbruk delt på totalgrensen, siste time og siste døgn.  |
-| `communication_message_sent_total`            | `tenant`, `channel`                               | Meldinger sendt til leverandøren.                        |
-| `communication_message_retried_total`         | `tenant`, `channel`, `reason`                     | Forbigående feil som gir nytt forsøk.                    |
-| `communication_message_failed_total`          | `tenant`, `channel`, `reason`                     | Meldinger som ikke ble sendt.                            |
-| `communication_dispatch_queue_size`           | –                                                 | Meldinger i køen.                                        |
-| `communication_dispatch_queue_oldest_seconds` | –                                                 | Alderen på den eldste meldingen i køen.                  |
+| Metrikk                                           | Tagger                                                                | Betydning                                                          |
+|---------------------------------------------------|-----------------------------------------------------------------------|--------------------------------------------------------------------|
+| `communication_message_accepted_total`            | `tenant`, `channel`                                                   | Aksepterte meldinger (`202`).                                      |
+| `communication_limit_rejected_total`              | `limit` (`mottaker`, `tenant`, `total`), `tenant`                     | Meldinger avvist av en grense (`429`).                             |
+| `communication_blocklist_rejected_total`          | `tenant`                                                              | Meldinger avvist fordi mottakeren er blokkert (`422`).             |
+| `communication_limit_tenant_usage_ratio`          | `tenant`, `window` (`hour`, `day`)                                    | Forbruk delt på tenantgrensen, siste time og siste døgn.           |
+| `communication_limit_total_usage_ratio`           | `window` (`hour`, `day`)                                              | Forbruk delt på totalgrensen, siste time og siste døgn.            |
+| `communication_message_sent_total`                | `tenant`, `channel`                                                   | Meldinger sendt til leverandøren.                                  |
+| `communication_message_retried_total`             | `tenant`, `channel`, `reason`                                         | Forbigående feil som gir nytt forsøk.                              |
+| `communication_message_failed_total`              | `tenant`, `channel`, `reason`                                         | Meldinger som ikke ble sendt.                                      |
+| `communication_dispatch_queue_size`               | –                                                                     | Meldinger i køen.                                                  |
+| `communication_dispatch_queue_oldest_seconds`     | –                                                                     | Alderen på den eldste meldingen i køen.                            |
+| `communication_delivery_report_received_total`    | `tenant`, `channel`, `template`, `status`                             | Leveringsrapporter for kjente meldinger, per status fra rapporten. |
+| `communication_delivery_report_discarded_total`   | `reason` (`invalid`, `unsupported-type`, `unknown-message`, `poison`) | Rapporter som ble forkastet.                                       |
+| `communication_delivery_report_poll_failed_total` | –                                                                     | Feil mot rapportkøen.                                              |
+| `communication_delivery_report_queue_size`        | –                                                                     | Rapporter som venter i køen.                                       |
 
 Utnyttelsen og kø-metrikkene regnes ut fra databasen hvert minutt og er like på alle replikaer, så
 bruk `max` og ikke `sum` på tvers av pods.
 
 **Dashboard.** [`grafana/fint-communication-service.json`](grafana/fint-communication-service.json)
-viser utnyttelse, avvisninger, aksepterte, sendte og feilede meldinger per tenant, og utsendingskøen. Det importeres manuelt i Grafana
+viser utnyttelse, avvisninger, aksepterte, sendte og feilede meldinger per tenant, utsendingskøen,
+leveringsrapporter per status, bounce-rate og rapportkøen. Det importeres manuelt i Grafana
 (Dashboards → New → Import → last opp filen, og velg Prometheus-datakilden). Endringer gjøres i Grafana,
 eksporteres som JSON og legges inn i repoet med PR.
 
@@ -555,7 +610,12 @@ eksporteres som JSON og legges inn i repoet med PR.
 - over 10 avvisninger på mottakergrensen per tenant per time,
 - over 10 blokkerte innsendinger per tenant per time,
 - meldinger som ikke ble sendt,
-- en melding som har ligget i køen i over 15 minutter.
+- en melding som har ligget i køen i over 15 minutter,
+- bounce-rate over 5 % siste time (minst 20 rapporter),
+- klager på over 0,1 % av leverte meldinger siste døgn,
+- leveringsrapporter forkastet som poison,
+- over 1000 rapporter i rapportkøen i 15 minutter,
+- feil mot rapportkøen i 15 minutter.
 
 Reglene registreres manuelt i Grafana Alerts med uttrykkene, tersklene og varighetene i runbooken.
 
@@ -597,6 +657,34 @@ Når SES-kontoen, domenet og avsenderadressen finnes:
 
 Mangler avsenderen når leverandøren er `ses`, stopper oppstarten. Mangler nøklene, feiler hver
 sending og blir liggende i køen til nøklene er på plass eller forsøkene er brukt opp.
+
+### Slå på leveringsrapporter
+
+Når SES er slått på, og SNS-topicet og SQS-køen finnes:
+
+1. Sjekk at configuration set-et har en event destination til SNS-topicet med hendelsene `Delivery`,
+   `Bounce`, `Complaint` og `Reject`, at køen abonnerer på topicet, og at
+   `communication.email.ses.configuration-set` er satt.
+2. Gi IAM-brukeren `sqs:ReceiveMessage`, `sqs:DeleteMessage` og `sqs:GetQueueAttributes` på køen.
+3. Slå på mottaket i overlayet og deploy:
+
+   ```yaml
+   - op: add
+     path: "/spec/env/-"
+     value:
+       name: "communication.email.delivery-reports.enabled"
+       value: "true"
+   - op: add
+     path: "/spec/env/-"
+     value:
+       name: "communication.email.delivery-reports.queue-url"
+       value: "https://sqs.eu-north-1.amazonaws.com/<konto>/email-delivery-reports"
+   ```
+
+4. Følg [Verifisere leveringsrapporter](docs/runbook.md#verifisere-leveringsrapporter) i runbooken.
+
+Mangler URL-en til køen når mottaket er slått på, stopper oppstarten. At køen er utilgjengelig etter
+oppstart, stopper ikke tjenesten.
 
 ## Låsing av avhengigheter
 

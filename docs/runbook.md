@@ -1,9 +1,10 @@
-# Runbook: grenser, blokkerte innsendinger og utsending
+# Runbook: grenser, blokkerte innsendinger, utsending og leveringsrapporter
 
 Runbooken beskriver hva vakthavende gjør når et varsel for fint-communication-service går. Grensene og
 blokkeringslisten er beskrevet i [README](../README.md#grenser) og
-[arkitekturdokumentet](architecture.md#grenser), og utsendingen i [README](../README.md#utsending) og
-[arkitekturdokumentet](architecture.md#hva-skjer-med-meldingen-etter-202).
+[arkitekturdokumentet](architecture.md#grenser), utsendingen i [README](../README.md#utsending) og
+[arkitekturdokumentet](architecture.md#hva-skjer-med-meldingen-etter-202), og leveringsrapportene i
+[README](../README.md#leveringsrapporter) og [arkitekturdokumentet](architecture.md#leveringsrapporter).
 
 ## Innhold
 
@@ -17,30 +18,42 @@ blokkeringslisten er beskrevet i [README](../README.md#grenser) og
 8. [Mange blokkerte innsendinger](#mange-blokkerte-innsendinger)
 9. [Meldinger feilet](#meldinger-feilet)
 10. [Køen står](#køen-står)
-11. [Slå opp en melding](#slå-opp-en-melding)
-12. [Justere grenser](#justere-grenser)
-13. [Testvarsel](#testvarsel)
-14. [Verifisere utsending](#verifisere-utsending)
+11. [Høy bounce-rate](#høy-bounce-rate)
+12. [Klager](#klager)
+13. [Rapporter forkastet](#rapporter-forkastet)
+14. [Rapportkøen vokser](#rapportkøen-vokser)
+15. [Mottak av rapporter feiler](#mottak-av-rapporter-feiler)
+16. [Slå opp en melding](#slå-opp-en-melding)
+17. [Justere grenser](#justere-grenser)
+18. [Testvarsel](#testvarsel)
+19. [Verifisere utsending](#verifisere-utsending)
+20. [Verifisere leveringsrapporter](#verifisere-leveringsrapporter)
 
 ## Metrikker
 
-| Metrikk (Prometheus)                          | Type    | Tagger                                                                                                     | Betydning                                              |
-|-----------------------------------------------|---------|------------------------------------------------------------------------------------------------------------|--------------------------------------------------------|
-| `communication_limit_rejected_total`          | Counter | `limit` (`mottaker`, `tenant`, `total`), `tenant`                                                          | Meldinger avvist med 429.                              |
-| `communication_blocklist_rejected_total`      | Counter | `tenant`                                                                                                   | Meldinger avvist med 422 fordi mottakeren er blokkert. |
-| `communication_message_accepted_total`        | Counter | `tenant`, `channel`                                                                                        | Meldinger akseptert med 202.                           |
-| `communication_limit_tenant_usage_ratio`      | Gauge   | `tenant`, `window` (`hour`, `day`)                                                                         | Forbruk delt på tenantens grense i glidende vindu.     |
-| `communication_limit_total_usage_ratio`       | Gauge   | `window` (`hour`, `day`)                                                                                   | Forbruk delt på totalgrensen i glidende vindu.         |
-| `communication_message_sent_total`            | Counter | `tenant`, `channel`                                                                                        | Meldinger sendt til leverandøren.                      |
-| `communication_message_retried_total`         | Counter | `tenant`, `channel`, `reason` (`timeout`, `throttled`, `server-error`, `unauthorized`, `io`, `unexpected`) | Forbigående feil; meldingen prøves igjen.              |
-| `communication_message_failed_total`          | Counter | `tenant`, `channel`, `reason` (`rejected`, `retries-exhausted`)                                            | Meldinger som ikke ble sendt.                          |
-| `communication_dispatch_queue_size`           | Gauge   | –                                                                                                          | Meldinger i køen (ikke sendt eller feilet ennå).       |
-| `communication_dispatch_queue_oldest_seconds` | Gauge   | –                                                                                                          | Alderen på den eldste meldingen i køen.                |
+| Metrikk (Prometheus)                              | Type    | Tagger                                                                                                     | Betydning                                                        |
+|---------------------------------------------------|---------|------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------|
+| `communication_limit_rejected_total`              | Counter | `limit` (`mottaker`, `tenant`, `total`), `tenant`                                                          | Meldinger avvist med 429.                                        |
+| `communication_blocklist_rejected_total`          | Counter | `tenant`                                                                                                   | Meldinger avvist med 422 fordi mottakeren er blokkert.           |
+| `communication_message_accepted_total`            | Counter | `tenant`, `channel`                                                                                        | Meldinger akseptert med 202.                                     |
+| `communication_limit_tenant_usage_ratio`          | Gauge   | `tenant`, `window` (`hour`, `day`)                                                                         | Forbruk delt på tenantens grense i glidende vindu.               |
+| `communication_limit_total_usage_ratio`           | Gauge   | `window` (`hour`, `day`)                                                                                   | Forbruk delt på totalgrensen i glidende vindu.                   |
+| `communication_message_sent_total`                | Counter | `tenant`, `channel`                                                                                        | Meldinger sendt til leverandøren.                                |
+| `communication_message_retried_total`             | Counter | `tenant`, `channel`, `reason` (`timeout`, `throttled`, `server-error`, `unauthorized`, `io`, `unexpected`) | Forbigående feil; meldingen prøves igjen.                        |
+| `communication_message_failed_total`              | Counter | `tenant`, `channel`, `reason` (`rejected`, `retries-exhausted`)                                            | Meldinger som ikke ble sendt.                                    |
+| `communication_dispatch_queue_size`               | Gauge   | –                                                                                                          | Meldinger i køen (ikke sendt eller feilet ennå).                 |
+| `communication_dispatch_queue_oldest_seconds`     | Gauge   | –                                                                                                          | Alderen på den eldste meldingen i køen.                          |
+| `communication_delivery_report_received_total`    | Counter | `tenant`, `channel`, `template`, `status` (`DELIVERED`, `BOUNCED`, `SUPPRESSED`, `FAILED`, `COMPLAINED`)   | Leveringsrapporter for kjente meldinger, per status i rapporten. |
+| `communication_delivery_report_discarded_total`   | Counter | `reason` (`invalid`, `unsupported-type`, `unknown-message`, `poison`)                                      | Rapporter som ble forkastet.                                     |
+| `communication_delivery_report_poll_failed_total` | Counter | –                                                                                                          | Feil mot rapportkøen (henting eller sletting).                   |
+| `communication_delivery_report_queue_size`        | Gauge   | –                                                                                                          | Rapporter som venter i køen (omtrentlig, fra SQS).               |
 
 Utnyttelsen regnes ut fra `send_usage` hvert minutt (`communication.limits.usage-refresh`), og kø-metrikkene
 fra `dispatch_queue` hvert minutt (`communication.dispatch.queue-metrics-refresh`), så de kan ligge opptil ett
 minutt etter. Hver replika rapporterer samme verdi, så bruk `max`, ikke `sum`, på tvers av pods. Ingen
-metrikk har adresse eller hash.
+metrikk har adresse eller hash. Metrikkene for leveringsrapporter finnes bare når mottaket er slått på
+(`communication.email.delivery-reports.enabled`). `template` er mal-ID-en, så bounce-raten kan
+brytes ned per mal.
 
 Dashboardet ligger i [`grafana/fint-communication-service.json`](../grafana/fint-communication-service.json).
 
@@ -50,16 +63,21 @@ Varslene registreres manuelt i Grafana Alerts med metrikkene, tersklene og varig
 Tabellen er kilden: endres en regel i Grafana, oppdateres den her også.
 `$app` står for `app="fint-communication-service"`.
 
-| Varsel                       | Uttrykk                                                                                           | I minst | Alvorlighet |
-|------------------------------|---------------------------------------------------------------------------------------------------|---------|-------------|
-| Høy utnyttelse, tenant       | `max by (tenant, window) (communication_limit_tenant_usage_ratio{$app}) > 0.8`                    | 5m      | warning     |
-| Høy utnyttelse, total        | `max by (window) (communication_limit_total_usage_ratio{$app}) > 0.8`                             | 5m      | warning     |
-| Tenantgrense nådd            | `sum by (tenant) (increase(communication_limit_rejected_total{$app, limit="tenant"}[5m])) > 0`    | –       | warning     |
-| Totalgrense nådd             | `sum (increase(communication_limit_rejected_total{$app, limit="total"}[5m])) > 0`                 | –       | critical    |
-| Mange mottaker-429           | `sum by (tenant) (increase(communication_limit_rejected_total{$app, limit="mottaker"}[1h])) > 10` | –       | warning     |
-| Mange blokkerte innsendinger | `sum by (tenant) (increase(communication_blocklist_rejected_total{$app}[1h])) > 10`               | –       | warning     |
-| Meldinger feilet             | `sum by (tenant, reason) (increase(communication_message_failed_total{$app}[15m])) > 0`           | –       | warning     |
-| Køen står                    | `max(communication_dispatch_queue_oldest_seconds{$app}) > 900`                                    | 5m      | critical    |
+| Varsel                       | Uttrykk                                                                                                                                                                                                                                                  | I minst | Alvorlighet |
+|------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|-------------|
+| Høy utnyttelse, tenant       | `max by (tenant, window) (communication_limit_tenant_usage_ratio{$app}) > 0.8`                                                                                                                                                                           | 5m      | warning     |
+| Høy utnyttelse, total        | `max by (window) (communication_limit_total_usage_ratio{$app}) > 0.8`                                                                                                                                                                                    | 5m      | warning     |
+| Tenantgrense nådd            | `sum by (tenant) (increase(communication_limit_rejected_total{$app, limit="tenant"}[5m])) > 0`                                                                                                                                                           | –       | warning     |
+| Totalgrense nådd             | `sum (increase(communication_limit_rejected_total{$app, limit="total"}[5m])) > 0`                                                                                                                                                                        | –       | critical    |
+| Mange mottaker-429           | `sum by (tenant) (increase(communication_limit_rejected_total{$app, limit="mottaker"}[1h])) > 10`                                                                                                                                                        | –       | warning     |
+| Mange blokkerte innsendinger | `sum by (tenant) (increase(communication_blocklist_rejected_total{$app}[1h])) > 10`                                                                                                                                                                      | –       | warning     |
+| Meldinger feilet             | `sum by (tenant, reason) (increase(communication_message_failed_total{$app}[15m])) > 0`                                                                                                                                                                  | –       | warning     |
+| Køen står                    | `max(communication_dispatch_queue_oldest_seconds{$app}) > 900`                                                                                                                                                                                           | 5m      | critical    |
+| Høy bounce-rate              | `sum(increase(communication_delivery_report_received_total{$app, status="BOUNCED"}[1h])) / sum(increase(communication_delivery_report_received_total{$app}[1h])) > 0.05 and sum(increase(communication_delivery_report_received_total{$app}[1h])) >= 20` | –       | warning     |
+| Klager                       | `sum(increase(communication_delivery_report_received_total{$app, status="COMPLAINED"}[1d])) / sum(increase(communication_delivery_report_received_total{$app, status="DELIVERED"}[1d])) > 0.001`                                                         | –       | warning     |
+| Rapporter forkastet          | `sum(increase(communication_delivery_report_discarded_total{$app, reason="poison"}[15m])) > 0`                                                                                                                                                           | –       | warning     |
+| Rapportkøen vokser           | `max(communication_delivery_report_queue_size{$app}) > 1000`                                                                                                                                                                                             | 15m     | warning     |
+| Mottak av rapporter feiler   | `sum(increase(communication_delivery_report_poll_failed_total{$app}[5m])) > 0`                                                                                                                                                                           | 15m     | warning     |
 
 Alle avvisninger på tenant- og totalgrensen varsles, siden de betyr at meldinger ikke blir sendt. Det
 samme gjelder alle meldinger som feiler etter `202`, siden konsumenten ikke får vite om det (meldingsstatus
@@ -202,6 +220,72 @@ i det hele tatt.
   ORDER BY attempts;
   ```
 
+## Høy bounce-rate
+
+**Betyr:** mer enn 5 % av leveringsrapportene siste time er `BOUNCED`. Adressene blokkeres
+automatisk i 30 dager, men en høy rate skader omdømmet til avsenderdomenet, og AWS setter kontoen
+under vurdering ved 5 % og kan sette sendingen på pause ved 10 % («Reputation metrics» i SES).
+
+**Finn årsaken:**
+
+- `sum by (tenant, template) (increase(communication_delivery_report_received_total{$app, status="BOUNCED"}[1h]))`
+  viser hvilken tenant og mal det gjelder. Ofte er det én konsument med en gammel eller feil
+  adresseliste.
+- I Loki: `Leveringsrapport` med `sesEvent=Bounce/Permanent` gir meldings-ID-ene, uten adresse.
+- Kontakt teamet som eier konsumenten. Tjenesten har ikke adressene; konsumenten må finne dem via
+  meldings-ID-ene i sitt eget system.
+
+## Klager
+
+**Betyr:** mer enn 0,1 % av de leverte meldingene siste døgn har fått en klage (mottakeren har merket
+den som spam). Mottakerne blokkeres som opt-out. AWS setter kontoen under vurdering ved 0,1 % og kan
+sette sendingen på pause ved 0,5 %.
+
+**Finn årsaken:** `sum by (tenant, template) (increase(communication_delivery_report_received_total{$app, status="COMPLAINED"}[1d]))`
+viser tenant og mal. I Loki gir `sesEvent=Complaint` meldings-ID-ene. Kontakt teamet som eier
+konsumenten: mottakerne vil trolig ikke ha disse meldingene, eller innholdet ser ut som spam.
+
+## Rapporter forkastet
+
+**Betyr:** en leveringsrapport er hentet 5 ganger uten å bli lagret, og er slettet (poison). Status
+for meldingen er ikke oppdatert, og en ev. bounce eller klage er ikke blokkert.
+
+**Finn årsaken:** søk i Loki etter `Kunne ikke lagre leveringsrapporten`. Linjen har meldings-ID og
+unntakstypen. Det skyldes nesten alltid at databasen har vært utilgjengelig i over 20 minutter
+(5 × `visibility-timeout`); sjekk `db` i readiness og databasen i `fint-common`. Hendelsen kan ikke
+hentes tilbake. Gjaldt den en bounce, står adressen på suppression-listen i SES, og neste melding gir
+en `Bounce/Suppressed`-rapport som blokkerer den.
+
+`reason="invalid"` og `reason="unsupported-type"` varsles ikke, men betyr at configuration set-et
+publiserer andre hendelser enn `Delivery`, `Bounce`, `Complaint` og `Reject`, eller at noe annet enn
+SNS skriver til køen (se [Slå på leveringsrapporter](../README.md#slå-på-leveringsrapporter)).
+`reason="unknown-message"` er forventet i små mengder: rapporter for meldinger som er slettet etter
+60 dager.
+
+## Rapportkøen vokser
+
+**Betyr:** over 1000 rapporter har ventet i køen i 15 minutter. Status og blokkering blir oppdatert
+sent.
+
+**Finn årsaken:** sjekk først [Mottak av rapporter feiler](#mottak-av-rapporter-feiler). Feiler ikke
+hentingen, sjekk at podden kjører og at `communication.email.delivery-reports.enabled` er `true`.
+SQS holder meldingene i 4 dager som standard (opptil 14 dager med `MessageRetentionPeriod`), og
+ingenting går tapt så lenge køen tømmes innen det.
+
+## Mottak av rapporter feiler
+
+**Betyr:** tjenesten har ikke fått kontakt med rapportkøen på 15 minutter. Utsending og mottak av
+meldinger virker som før; rapportene blir liggende i køen.
+
+**Finn årsaken:** søk i Loki etter `Kunne ikke hente leveringsrapporter fra køen`. Linjen har bare
+unntakstypen.
+
+- `SqsException` med 403 eller `SdkClientException`: nøklene til IAM-brukeren er feil, rotert eller
+  mangler tilgang til køen. Sjekk `AWS_ACCESS_KEY_ID` og `AWS_SECRET_ACCESS_KEY` i 1Password-itemet og
+  IAM-policyen, og restart podden.
+- `QueueDoesNotExistException`: URL-en i `communication.email.delivery-reports.queue-url` er feil.
+- Nettverksfeil eller timeout: sjekk AWS Health Dashboard og nettverket ut av clusteret.
+
 ## Slå opp en melding
 
 Status for én melding, f.eks. når en konsument spør om en meldings-ID:
@@ -218,6 +302,10 @@ SELECT m.status, m.failure_reason, m.received_at, m.updated_at, q.attempts, q.ne
 FROM message m LEFT JOIN dispatch_queue q USING (message_id)
 WHERE m.message_id = '<meldings-ID>';
 ```
+
+Etter `SENT` kan status bli `DELIVERED`, `BOUNCED`, `SUPPRESSED` eller `FAILED` (`DELIVERY_FAILED`
+eller `REJECTED`) fra leveringsrapporten. `updated_at` er da når rapporten ble behandlet. Loggen har
+`Leveringsrapport id=<meldings-ID>` med SES-hendelsen.
 
 `404` eller ingen rad betyr at ID-en er ukjent, eller at meldingen ble mottatt for mer enn 60 dager
 siden og er slettet. Mer om hva som skjedde, finnes i Loki (søk på ID-en).
@@ -295,3 +383,36 @@ være verifisert i SES.
    - `communication_message_sent_total{tenant="NOVARI"}` har økt,
    - e-posten har kommet fram, med avsender fra `communication.email.sender` og svaradresse
      `no-reply@novari.no`, uten sporingspiksel eller omskrevne lenker.
+
+## Verifisere leveringsrapporter
+
+Bekrefter at leveringsrapportene fra SES gir status og blokkering i beta. Forutsetter at SES og
+mottaket av leveringsrapporter er slått på (se [README](../README.md#slå-på-leveringsrapporter)).
+SES har en egen simulator for testing, som virker også i sandkassen og ikke teller mot bounce-raten.
+
+1. Åpne en port til tjenesten som i [Verifisere utsending](#verifisere-utsending).
+2. Send testmalen til simulatoradressene `success@simulator.amazonses.com`,
+   `bounce@simulator.amazonses.com` og `complaint@simulator.amazonses.com`:
+
+   ```bash
+   curl -i -X POST localhost:8080/api/v1/messages -H 'Content-Type: application/json' -d '{"tenant":"NOVARI","message":{"channel":"EMAIL","to":"<adresse>","templateId":"novari/test","variables":{"melding":"Verifisering av leveringsrapporter"}}}'
+   ```
+3. Vent et par minutter, og bekreft:
+   - `GET /api/v1/messages/<ID>` gir `DELIVERED` for `success@…`, `BOUNCED` for `bounce@…` og
+     `DELIVERED` for `complaint@…`,
+   - loggen har `Leveringsrapport id=<ID> sesEvent=Bounce/Permanent status=BOUNCED … blokkert=ja` og
+     `sesEvent=Complaint … blokkert=ja`,
+   - `communication_delivery_report_received_total{tenant="NOVARI", status="BOUNCED"}` har økt,
+   - en ny melding til `bounce@…` eller `complaint@…` gir `422`,
+   - blokkeringene ligger i databasen med `source = 'SES'`, `HARD_BOUNCE` med utløp om 30 dager og
+     `OPT_OUT` uten utløp (hashen beregnes som i
+     [driftsrutinen](../README.md#driftsrutine-for-blokkeringslisten)):
+
+     ```sql
+     SELECT reason, source, created_at, expires_at FROM recipient_blocklist WHERE recipient_hash = '<hash>';
+     ```
+
+4. Fjern blokkeringene etterpå med SQL-en i driftsrutinen.
+
+Det er ikke verifisert om SNS-abonnementet leverer med eller uten SNS-konvolutt (begge leses).
+Oppdater dette avsnittet med det du ser første gang.

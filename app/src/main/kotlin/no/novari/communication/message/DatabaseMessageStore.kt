@@ -38,7 +38,7 @@ class DatabaseMessageStore(
         jdbcClient
             .sql(
                 """
-                SELECT message_id, tenant, channel, template_id, status, failure_reason, received_at, updated_at
+                SELECT $COLUMNS
                 FROM message
                 WHERE message_id = :messageId
                 """.trimIndent(),
@@ -68,6 +68,35 @@ class DatabaseMessageStore(
             .update()
     }
 
+    override fun applyReport(
+        id: MessageId,
+        status: MessageStatus,
+        failureReason: FailureReason?,
+        at: Instant,
+    ): ReportOutcome {
+        val updated =
+            jdbcClient
+                .sql(
+                    """
+                    UPDATE message
+                    SET status = :status, failure_reason = :failureReason, updated_at = :updatedAt
+                    WHERE message_id = :messageId AND status IN (:open)
+                    RETURNING $COLUMNS
+                    """.trimIndent(),
+                ).param("status", status.name)
+                .param("failureReason", failureReason?.name)
+                .param("updatedAt", at.toOffsetDateTime())
+                .param("messageId", id.value)
+                .param("open", listOf(MessageStatus.RECEIVED.name, MessageStatus.SENT.name))
+                .query { rs, _ -> rs.toStoredMessage() }
+                .optional()
+                .orElse(null)
+        return when {
+            updated != null -> ReportOutcome.Applied(updated)
+            else -> find(id)?.let(ReportOutcome::Unchanged) ?: ReportOutcome.NotFound
+        }
+    }
+
     fun deleteReceivedBefore(cutoff: Instant): Int =
         jdbcClient
             .sql(
@@ -92,4 +121,8 @@ class DatabaseMessageStore(
         )
 
     private fun Instant.toOffsetDateTime(): OffsetDateTime = OffsetDateTime.ofInstant(this, ZoneOffset.UTC)
+
+    private companion object {
+        const val COLUMNS = "message_id, tenant, channel, template_id, status, failure_reason, received_at, updated_at"
+    }
 }
