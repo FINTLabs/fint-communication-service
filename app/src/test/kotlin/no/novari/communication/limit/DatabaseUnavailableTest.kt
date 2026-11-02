@@ -1,6 +1,7 @@
 package no.novari.communication.limit
 
 import no.novari.communication.IntegrationTestConfiguration
+import no.novari.communication.TEST_DISPATCH_ENCRYPTION_KEY
 import no.novari.communication.TEST_RECIPIENT_HASHING_KEY
 import no.novari.communication.api.MessageController
 import org.hamcrest.Matchers.containsString
@@ -21,6 +22,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer
 @SpringBootTest(
     properties = [
         "communication.recipient-hashing.key=$TEST_RECIPIENT_HASHING_KEY",
+        "communication.dispatch.encryption-key=$TEST_DISPATCH_ENCRYPTION_KEY",
+        "communication.dispatch.poll-interval=1h",
         "spring.datasource.hikari.connection-timeout=1000",
         "spring.datasource.hikari.validation-timeout=250",
     ],
