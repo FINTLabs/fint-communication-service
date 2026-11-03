@@ -23,21 +23,10 @@ class SendUsageRepository(
             .query {}
     }
 
-    fun lockRecipient(recipient: RecipientHash) {
-        acquireLock(jdbcClient.sql("SELECT pg_advisory_xact_lock(:key)").param("key", lockKey(recipient)))
-    }
-
-    // To-int-varianten har et eget nøkkelrom i Postgres og kan ikke kollidere med mottakernøklene (bigint).
-    fun lockTotal() {
-        acquireLock(
-            jdbcClient.sql("SELECT pg_advisory_xact_lock(:namespace, 0)").param("namespace", TOTAL_LOCK_NAMESPACE),
-        )
-    }
-
     // Spring oversetter ikke lock_not_available, så uten dette ville lock timeout gitt 500 i stedet for 503.
-    private fun acquireLock(statement: JdbcClient.StatementSpec) {
+    fun lock() {
         try {
-            statement.query {}
+            jdbcClient.sql("SELECT pg_advisory_xact_lock(:key, 0)").param("key", LOCK_KEY).query {}
         } catch (exception: UncategorizedSQLException) {
             if (exception.sqlException?.sqlState != LOCK_NOT_AVAILABLE_SQL_STATE) throw exception
             throw CannotAcquireLockException("Fikk ikke låsen innen lock_timeout", exception)
@@ -113,12 +102,10 @@ class SendUsageRepository(
             .param("cutoff", cutoff.toOffsetDateTime())
             .update()
 
-    private fun lockKey(recipient: RecipientHash): Long = java.lang.Long.parseUnsignedLong(recipient.value.take(16), 16)
-
     private fun Instant.toOffsetDateTime(): OffsetDateTime = OffsetDateTime.ofInstant(this, ZoneOffset.UTC)
 
     private companion object {
-        const val TOTAL_LOCK_NAMESPACE = 1
+        const val LOCK_KEY = 1
         const val LOCK_NOT_AVAILABLE_SQL_STATE = "55P03"
     }
 }

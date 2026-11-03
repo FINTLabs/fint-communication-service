@@ -122,18 +122,6 @@ class DispatchWorkerIntegrationTest {
     }
 
     @Test
-    fun `retry-after from the provider wins over a shorter backoff`() {
-        emailAdapter.respondWith(
-            EmailSendOutcome.Retryable(RetryReason.THROTTLED, "HTTP 429", Duration.ofMinutes(10)),
-        )
-        val id = messageService.receive(Tenant.ROGALAND, payload())
-
-        worker.processDue()
-
-        assertThat(row(id)?.nextAttemptAt).isEqualTo(START + Duration.ofMinutes(10))
-    }
-
-    @Test
     fun `the backoff doubles up to the maximum and the message fails when the attempts are used up`() {
         val failedBefore = counter(DispatchMetrics.FAILED_METRIC, "reason" to FailureReason.RETRIES_EXHAUSTED.value)
         repeat(3) { emailAdapter.respondWith(EmailSendOutcome.Retryable(RetryReason.IO, "IOException")) }

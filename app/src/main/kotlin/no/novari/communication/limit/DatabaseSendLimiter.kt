@@ -21,17 +21,16 @@ class DatabaseSendLimiter(
     private val recipientLimits = properties.recipient.slidingWindows()
     private val totalLimits = properties.total.slidingWindows()
 
-    // Låsene slippes først ved commit, så kallerens transaksjon må også dekke dispatch.
-    // Den globale låsen serialiserer alle innsendinger og dekker dermed også tenantgrensen.
+    // Låsen slippes først ved commit, så kallerens transaksjon må også dekke dispatch.
+    // Den serialiserer alle innsendinger og dekker dermed alle tre grensene.
     @Transactional(propagation = Propagation.MANDATORY)
     override fun checkAndRecord(
         message: OutgoingMessage,
         recipient: RecipientHash,
     ) {
         repository.setLockTimeout(LOCK_TIMEOUT)
-        repository.lockRecipient(recipient)
-        repository.lockTotal()
-        // Leses etter låsene: receivedAt kan være flere sekunder gammelt hvis forespørselen ventet på en lås.
+        repository.lock()
+        // Leses etter låsen: receivedAt kan være flere sekunder gammelt hvis forespørselen ventet på låsen.
         val now = clock.instant()
         val since = now - DAY
         val exceeded =
