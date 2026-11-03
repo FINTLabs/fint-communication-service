@@ -852,7 +852,7 @@ Listen er global (på tvers av tenants) og lagrer bare `RecipientHash`.
 |------------------|---------------------------------------------------------------|
 | `recipient_hash` | `RecipientHash`. Del av primærnøkkelen.                       |
 | `reason`         | `OPT_OUT` eller `HARD_BOUNCE` (CHECK). Del av primærnøkkelen. |
-| `source`         | `MANUAL` (driftsrutinen) eller `ACS` (FFS-2338) (CHECK).      |
+| `source`         | `MANUAL` (driftsrutinen) (CHECK).                             |
 | `created_at`     | Når raden ble lagt inn (`now()` som default).                 |
 | `expires_at`     | `NULL` for `OPT_OUT`, påkrevd for `HARD_BOUNCE` (CHECK).      |
 
