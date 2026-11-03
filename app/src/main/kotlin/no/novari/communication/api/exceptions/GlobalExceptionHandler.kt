@@ -67,7 +67,7 @@ class GlobalExceptionHandler : ResponseEntityExceptionHandler() {
         )
     }
 
-    // Når forbindelsen dør midt i en transaksjon, feiler også rollback, og Spring skjuler da den opprinnelige feilen.
+    // When the connection dies mid-transaction, rollback fails too, and Spring then hides the original exception.
     @ExceptionHandler(TransactionSystemException::class)
     fun handleTransactionFailure(exception: TransactionSystemException): ProblemDetail =
         if (isConnectionFailure(exception.originalException) || isConnectionFailure(exception.cause)) {

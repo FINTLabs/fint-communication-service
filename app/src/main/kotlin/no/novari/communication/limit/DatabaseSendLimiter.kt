@@ -20,7 +20,7 @@ class DatabaseSendLimiter(
             SlidingWindowLimit(properties.recipient.perDay, DAY),
         )
 
-    // Låsen slippes først ved commit, så kallerens transaksjon må også dekke dispatch.
+    // The lock is released only on commit, so the caller's transaction must also cover dispatch.
     @Transactional(propagation = Propagation.MANDATORY)
     override fun checkAndRecord(
         message: OutgoingMessage,
@@ -28,7 +28,7 @@ class DatabaseSendLimiter(
     ) {
         repository.setLockTimeout(LOCK_TIMEOUT)
         repository.lockRecipient(recipient)
-        // Leses etter låsen: receivedAt kan være flere sekunder gammelt hvis forespørselen ventet på låsen.
+        // Read after the lock: receivedAt can be several seconds old if the request waited for the lock.
         val now = clock.instant()
         val sentTimes = repository.recipientSentTimesSince(recipient, now - DAY)
         val retryAfter = recipientLimits.mapNotNull { it.retryAfter(sentTimes, now) }.maxOrNull()
