@@ -29,17 +29,17 @@ class DatabaseSendLimiter(
         repository.lock()
         // Leses etter låsen: receivedAt kan være flere sekunder gammelt hvis forespørselen ventet på låsen.
         val now = clock.instant()
-        val since = now - DAY
+        val usage = repository.usageSince(now - DAY)
         val exceeded =
             listOf(
                 LimitType.RECIPIENT to
-                    recipientLimits.retryAfter(repository.recipientSentTimesSince(recipient, since), now),
+                    recipientLimits.retryAfter(usage.filter { it.recipient == recipient }.map { it.sentAt }, now),
                 LimitType.TENANT to
                     properties.tenant
                         .forTenant(message.tenant)
                         .slidingWindows()
-                        .retryAfter(repository.tenantSentTimesSince(message.tenant, since), now),
-                LimitType.TOTAL to totalLimits.retryAfter(repository.sentTimesSince(since), now),
+                        .retryAfter(usage.filter { it.tenant == message.tenant }.map { it.sentAt }, now),
+                LimitType.TOTAL to totalLimits.retryAfter(usage.map { it.sentAt }, now),
             ).mapNotNull { (type, retryAfter) -> retryAfter?.let { type to it } }
                 .maxByOrNull { (_, retryAfter) -> retryAfter }
         if (exceeded != null) {
