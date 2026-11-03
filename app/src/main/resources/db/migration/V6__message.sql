@@ -3,9 +3,10 @@ CREATE TABLE message (
     tenant         text        NOT NULL,
     channel        text        NOT NULL,
     template_id    text        NOT NULL,
-    status         text        NOT NULL CONSTRAINT message_status CHECK (status IN ('RECEIVED', 'SENT', 'FAILED')),
+    status         text        NOT NULL CONSTRAINT message_status
+                               CHECK (status IN ('RECEIVED', 'SENT', 'FAILED', 'DELIVERED', 'BOUNCED', 'SUPPRESSED')),
     failure_reason text        CONSTRAINT message_failure_reason
-                               CHECK (failure_reason IN ('REJECTED', 'RETRIES_EXHAUSTED')),
+                               CHECK (failure_reason IN ('REJECTED', 'RETRIES_EXHAUSTED', 'DELIVERY_FAILED')),
     received_at    timestamptz NOT NULL,
     updated_at     timestamptz NOT NULL,
     CONSTRAINT message_failure_reason_when_failed CHECK ((status = 'FAILED') = (failure_reason IS NOT NULL))

@@ -1267,21 +1267,21 @@ Tjenesten har en egen Postgres-database, `fint-common`, som Flais setter opp fra
 |------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Tilgang    | Spring Data JDBC. Egen SQL skrives med `JdbcClient`.                                                                                                                                                                                                                                                      |
 | Skjema     | Flyway, `classpath:db/migration`, kjøres ved oppstart. `V1__baseline` er tom.                                                                                                                                                                                                                             |
-| Tabeller   | `send_usage` (`V2`, indeks per tenant i `V3`): forbruk for grensene. `recipient_blocklist` (`V4`): blokkeringslisten. `dispatch_queue` (`V5`): meldinger som venter på å bli sendt. `message` (`V6`, statuser fra leveringsrapportene i `V7`): status per melding.                                        |
+| Tabeller   | `send_usage` (`V2`, indeks per tenant i `V3`): forbruk for grensene. `recipient_blocklist` (`V4`): blokkeringslisten. `dispatch_queue` (`V5`): meldinger som venter på å bli sendt. `message` (`V6`): status per melding.                                                                                 |
 | Readiness  | `db` er med i readiness-gruppen; podden tas ut av trafikk når databasen ikke svarer.                                                                                                                                                                                                                      |
 | Opprydning | `RetentionCleanupJob` kjører kl. 03.15 (Europe/Oslo) og kaller hver `ExpiredRowsCleaner`.                                                                                                                                                                                                                 |
 | Retensjon  | Status per melding (`message`) beholdes i 60 dager etter mottak (`communication.retention.metadata`). `send_usage` beholdes i 24 timer. Utløpte blokkeringer slettes ved neste opprydning; `OPT_OUT` slettes aldri automatisk. En rad i `dispatch_queue` slettes når meldingen er sendt eller har feilet. |
 
 ### Meldingstabell
 
-`message` (`V6`, statusene fra rapportene i `V7`) har én rad per akseptert melding, fra mottak til den slettes etter 60 dager:
+`message` (`V6`) har én rad per akseptert melding, fra mottak til den slettes etter 60 dager:
 
 | Kolonne                            | Innhold                                                                                                    |
 |------------------------------------|------------------------------------------------------------------------------------------------------------|
 | `message_id`                       | Meldings-ID (primærnøkkel). Sendes til SES som taggen `messageId`, så det trengs ingen egen leverandør-ID. |
 | `tenant`, `channel`, `template_id` | Enum-navn og mal-ID, til logg og metrikker. Ikke med i status-svaret.                                      |
-| `status`                           | `RECEIVED`, `SENT`, `FAILED`, `DELIVERED`, `BOUNCED` eller `SUPPRESSED` (CHECK, `V7`).                     |
-| `failure_reason`                   | `REJECTED`, `RETRIES_EXHAUSTED` eller `DELIVERY_FAILED` (CHECK, `V7`). Satt bare når status er `FAILED`.   |
+| `status`                           | `RECEIVED`, `SENT`, `FAILED`, `DELIVERED`, `BOUNCED` eller `SUPPRESSED` (CHECK).                           |
+| `failure_reason`                   | `REJECTED`, `RETRIES_EXHAUSTED` eller `DELIVERY_FAILED` (CHECK). Satt bare når status er `FAILED`.         |
 | `received_at`                      | Mottakstidspunktet, fra `Clock`. Gir retensjonen og alderen på køen.                                       |
 | `updated_at`                       | Når status sist ble endret.                                                                                |
 
