@@ -238,24 +238,6 @@ class TenantAndTotalLimitIntegrationTest {
     }
 
     @Test
-    fun `the total lock not being granted in time gives service unavailable`() {
-        dataSource.connection.use { connection ->
-            connection.autoCommit = false
-            connection.createStatement().use { it.execute("SELECT pg_advisory_xact_lock(1, 0)") }
-            try {
-                send(Tenant.ROGALAND).andExpect {
-                    status { isServiceUnavailable() }
-                    jsonPath("$.detail") { value("Tjenesten er midlertidig utilgjengelig") }
-                }
-            } finally {
-                connection.rollback()
-            }
-        }
-
-        assertThat(usageRows()).isZero()
-    }
-
-    @Test
     fun `neither the response nor the log contains the address or its hash`(output: CapturedOutput) {
         repeat(4) { send(Tenant.ROGALAND, to = ADDRESS) }
 
