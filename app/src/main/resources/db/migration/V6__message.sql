@@ -13,5 +13,14 @@ CREATE TABLE message (
 
 CREATE INDEX message_received_at ON message (received_at);
 
+INSERT INTO message (message_id, tenant, channel, template_id, status, received_at, updated_at)
+SELECT message_id, tenant, channel, template_id, 'RECEIVED', received_at, received_at
+FROM dispatch_queue;
+
 ALTER TABLE dispatch_queue
+    DROP COLUMN tenant,
+    DROP COLUMN channel,
+    DROP COLUMN template_id,
+    DROP COLUMN status,
+    DROP COLUMN received_at,
     ADD CONSTRAINT dispatch_queue_message FOREIGN KEY (message_id) REFERENCES message (message_id);
