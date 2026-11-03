@@ -396,8 +396,7 @@ sequenceDiagram
     MS->>H: hash(to)
     H-->>MS: RecipientHash
     MS->>L: checkAndRecord(message, hash)
-    L->>DB: pg_advisory_xact_lock(hash)
-    L->>DB: pg_advisory_xact_lock(total)
+    L->>DB: pg_advisory_xact_lock(1, 0)
     L->>DB: tidspunkter siste 24 t for mottakeren, tenanten og totalt
     alt Grense overskredet
         L-->>MC: LimitExceededException
@@ -763,12 +762,12 @@ En tenantgrense lavere enn mottakergrensen er tillatt.
 
 `send_usage` har én rad per akseptert melding:
 
-| Kolonne          | Innhold                                                               |
-|------------------|-----------------------------------------------------------------------|
-| `message_id`     | Meldings-ID (primærnøkkel).                                           |
-| `recipient_hash` | `RecipientHash`. Global, så alle tenants deler teller.                |
-| `tenant`         | Enum-navnet. Grensen per tenant teller på denne.                      |
-| `sent_at`        | Tidspunkt fra `Clock`, lest etter at låsene er tatt (se Samtidighet). |
+| Kolonne          | Innhold                                                              |
+|------------------|----------------------------------------------------------------------|
+| `message_id`     | Meldings-ID (primærnøkkel).                                          |
+| `recipient_hash` | `RecipientHash`. Global, så alle tenants deler teller.               |
+| `tenant`         | Enum-navnet. Grensen per tenant teller på denne.                     |
+| `sent_at`        | Tidspunkt fra `Clock`, lest etter at låsen er tatt (se Samtidighet). |
 
 | Indeks                                                     | Brukes av                     |
 |------------------------------------------------------------|-------------------------------|
@@ -778,15 +777,13 @@ En tenantgrense lavere enn mottakergrensen er tillatt.
 
 - **Rekkefølge.** Mottaker → tenant → total. Alle tre telles, og forbruket registreres bare når
   ingen er brutt.
-- **Samtidighet.** `DatabaseSendLimiter` tar først `pg_advisory_xact_lock` på de første 64 bitene av
-  hashen, så en global lås (`pg_advisory_xact_lock(1, 0)`, et eget nøkkelrom som ikke kan kollidere
-  med mottakernøklene). Den globale låsen gjør at alle innsendinger, også fra flere pods, går etter
-  hverandre, og dekker dermed både tenant- og totalgrensen; en egen lås per tenant ville ikke gitt
-  noe ekstra. Ved noen hundre meldinger i timen og en kort transaksjon koster det ingenting. Låsene
-  tas alltid i samme rekkefølge, så det kan ikke oppstå vranglås. De slippes ved commit eller
+- **Samtidighet.** `DatabaseSendLimiter` tar en global lås (`pg_advisory_xact_lock(1, 0)`). Den gjør
+  at alle innsendinger, også fra flere pods, går etter hverandre, og dekker dermed alle tre grensene;
+  egne låser per mottaker eller tenant ville ikke gitt noe ekstra. Ved noen hundre meldinger i timen
+  og en kort transaksjon koster det ingenting. Låsen slippes ved commit eller
   rollback, og venter høyst 5 sekunder (`lock_timeout`, gir 503). Tidspunktet som brukes til
-  vinduene og lagres i `sent_at`, leses først når låsene er tatt, ikke `receivedAt`. Ellers kunne en
-  forespørsel som ventet på en lås, bli avvist for forbruk som allerede hadde gått ut av vinduet,
+  vinduene og lagres i `sent_at`, leses først når låsen er tatt, ikke `receivedAt`. Ellers kunne en
+  forespørsel som ventet på låsen, bli avvist for forbruk som allerede hadde gått ut av vinduet,
   eller bli registrert for tidlig, slik at neste melding slapp gjennom før det var gått et helt vindu.
 - **Retry-After.** For hvert vindu som er brutt, er neste ledige tidspunkt når raden nummer
   `antall − grense` (eldste først) faller ut av vinduet. Er flere grenser brutt, får svaret grensen
@@ -844,27 +841,26 @@ kjører da på hver replika; slettingene er idempotente, så det gjør ingen ska
 
 ## Sentrale beslutninger
 
-| Beslutning                                                                                                          | Begrunnelse                                                                                                            |
-|---------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------|
-| All e-post sendes via mal; ingen fritekst.                                                                          | Begrenser risikoen for personopplysninger i e-post; alt innhold gjennomgås i PR.                                       |
-| Maler er knyttet til kanal (`<team>/<kanal>/<mal>`).                                                                | Formatene er forskjellige per kanal; egne typer per kanal i koden.                                                     |
-| Team først i stien.                                                                                                 | Én CODEOWNERS-linje per team.                                                                                          |
-| Variabler er strenger; lister er typet med `maxItems` og felt.                                                      | Øvre grense for innhold kan regnes ut; tall og datoer formateres av klienten.                                          |
-| `replyTo` defineres i malen, ikke i requesten.                                                                      | Ingen risiko for personlige adresser som svaradresse.                                                                  |
-| Polymorf kontrakt (`{tenant, message: {channel, ...}}`) med sealed `Message`.                                       | Nøyaktig én melding følger av typen; nye kanaler er nye subtyper uten brudd i kontrakten.                              |
-| Malen rendres ved mottak.                                                                                           | Feil blir 400 med en gang; meldingen er uavhengig av senere malendringer.                                              |
-| ProblemDetail (RFC 9457) for alle feil.                                                                             | Standardformat, støttet direkte av Spring.                                                                             |
-| JMustache direkte, egen kontroll av taggene.                                                                        | Logic-less maler; reglene kan håndheves ved oppstart.                                                                  |
-| Port (`MessageDispatcher`) mellom mottak og leveranse.                                                              | Leveransen kan byttes ut uten å endre API eller service.                                                               |
-| `model` uten avhengigheter ved kjøring (bare `compileOnly` `jackson-annotations`), `client` uten autokonfigurasjon. | Bibliotekene kan brukes i alle Spring Boot 3- og 4-applikasjoner (Jackson 2 og 3).                                     |
-| Spring Data JDBC, ikke JPA.                                                                                         | Immutable Kotlin-klasser uten proxies. Tellere (`INSERT … ON CONFLICT`) og opprydning er native SQL uansett.           |
-| Mottakere lagres som HMAC-SHA256 med hemmelig nøkkel, ikke ren SHA-256.                                             | E-postadresser er lette å gjette; uten nøkkelen kan hashen ikke slås opp mot en liste med adresser.                    |
-| Ingen nøkkelrotasjon foreløpig.                                                                                     | Ingen tabeller trenger det ennå; blokkeringslisten (FFS-2336) må ta stilling til det.                                  |
-| Opprydning uten ShedLock.                                                                                           | Slettingene er idempotente; samtidige kjøringer på flere replikaer gjør ingen skade.                                   |
-| Grenser med `pg_advisory_xact_lock` på mottaker-hashen og en global lås.                                            | Atomisk på tvers av pods uten retry-logikk eller egen låsetabell.                                                      |
-| Én rad per akseptert melding i `send_usage`, ikke aggregerte bøtter.                                                | Ekte glidende vindu og eksakt `Retry-After`; få rader ved disse volumene.                                              |
-| Forbruk og dispatch i samme transaksjon.                                                                            | En melding som ikke ble akseptert, teller ikke, så klientens nye forsøk straffes ikke.                                 |
-| Fail-closed: databasen utilgjengelig gir 503.                                                                       | Grensene kan ikke omgås ved at databasen er nede.                                                                      |
-| Override per tenant må ha både `per-hour` og `per-day`, og ingen tenantgrense kan overstige totalgrensen.           | Ingen fletting med `default` å holde rede på; en tenantgrense over totalen ville aldri slått inn og er trolig en feil. |
-| Én global advisory lock (etter mottakerlåsen) i stedet for egen lås per tenant.                                     | Totalgrensen krever at alle innsendinger serialiseres; ved noen hundre meldinger i timen koster det ingenting.         |
-| Ved flere brudde grenser rapporteres den med lengst `Retry-After`.                                                  | Typen og ventetiden stemmer overens, og klienten får ikke ny 429 etter å ha ventet.                                    |
+| Beslutning                                                                                                          | Begrunnelse                                                                                                                           |
+|---------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
+| All e-post sendes via mal; ingen fritekst.                                                                          | Begrenser risikoen for personopplysninger i e-post; alt innhold gjennomgås i PR.                                                      |
+| Maler er knyttet til kanal (`<team>/<kanal>/<mal>`).                                                                | Formatene er forskjellige per kanal; egne typer per kanal i koden.                                                                    |
+| Team først i stien.                                                                                                 | Én CODEOWNERS-linje per team.                                                                                                         |
+| Variabler er strenger; lister er typet med `maxItems` og felt.                                                      | Øvre grense for innhold kan regnes ut; tall og datoer formateres av klienten.                                                         |
+| `replyTo` defineres i malen, ikke i requesten.                                                                      | Ingen risiko for personlige adresser som svaradresse.                                                                                 |
+| Polymorf kontrakt (`{tenant, message: {channel, ...}}`) med sealed `Message`.                                       | Nøyaktig én melding følger av typen; nye kanaler er nye subtyper uten brudd i kontrakten.                                             |
+| Malen rendres ved mottak.                                                                                           | Feil blir 400 med en gang; meldingen er uavhengig av senere malendringer.                                                             |
+| ProblemDetail (RFC 9457) for alle feil.                                                                             | Standardformat, støttet direkte av Spring.                                                                                            |
+| JMustache direkte, egen kontroll av taggene.                                                                        | Logic-less maler; reglene kan håndheves ved oppstart.                                                                                 |
+| Port (`MessageDispatcher`) mellom mottak og leveranse.                                                              | Leveransen kan byttes ut uten å endre API eller service.                                                                              |
+| `model` uten avhengigheter ved kjøring (bare `compileOnly` `jackson-annotations`), `client` uten autokonfigurasjon. | Bibliotekene kan brukes i alle Spring Boot 3- og 4-applikasjoner (Jackson 2 og 3).                                                    |
+| Spring Data JDBC, ikke JPA.                                                                                         | Immutable Kotlin-klasser uten proxies. Tellere (`INSERT … ON CONFLICT`) og opprydning er native SQL uansett.                          |
+| Mottakere lagres som HMAC-SHA256 med hemmelig nøkkel, ikke ren SHA-256.                                             | E-postadresser er lette å gjette; uten nøkkelen kan hashen ikke slås opp mot en liste med adresser.                                   |
+| Ingen nøkkelrotasjon foreløpig.                                                                                     | Ingen tabeller trenger det ennå; blokkeringslisten (FFS-2336) må ta stilling til det.                                                 |
+| Opprydning uten ShedLock.                                                                                           | Slettingene er idempotente; samtidige kjøringer på flere replikaer gjør ingen skade.                                                  |
+| Grenser med én global `pg_advisory_xact_lock`, ingen lås per mottaker eller tenant.                                 | Atomisk på tvers av pods uten retry-logikk eller egen låsetabell; ved noen hundre meldinger i timen koster serialiseringen ingenting. |
+| Én rad per akseptert melding i `send_usage`, ikke aggregerte bøtter.                                                | Ekte glidende vindu og eksakt `Retry-After`; få rader ved disse volumene.                                                             |
+| Forbruk og dispatch i samme transaksjon.                                                                            | En melding som ikke ble akseptert, teller ikke, så klientens nye forsøk straffes ikke.                                                |
+| Fail-closed: databasen utilgjengelig gir 503.                                                                       | Grensene kan ikke omgås ved at databasen er nede.                                                                                     |
+| Override per tenant må ha både `per-hour` og `per-day`, og ingen tenantgrense kan overstige totalgrensen.           | Ingen fletting med `default` å holde rede på; en tenantgrense over totalen ville aldri slått inn og er trolig en feil.                |
+| Ved flere brudde grenser rapporteres den med lengst `Retry-After`.                                                  | Typen og ventetiden stemmer overens, og klienten får ikke ny 429 etter å ha ventet.                                                   |
