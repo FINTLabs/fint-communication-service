@@ -1,7 +1,7 @@
 CREATE TABLE recipient_blocklist (
     recipient_hash char(64)    NOT NULL,
     reason         text        NOT NULL CONSTRAINT recipient_blocklist_reason CHECK (reason IN ('OPT_OUT', 'HARD_BOUNCE')),
-    source         text        NOT NULL CONSTRAINT recipient_blocklist_source CHECK (source IN ('MANUAL', 'SES')),
+    source         text        NOT NULL CONSTRAINT recipient_blocklist_source CHECK (source IN ('MANUAL')),
     created_at     timestamptz NOT NULL DEFAULT now(),
     expires_at     timestamptz,
     PRIMARY KEY (recipient_hash, reason),

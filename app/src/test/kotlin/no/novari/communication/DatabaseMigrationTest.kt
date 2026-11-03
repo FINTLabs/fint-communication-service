@@ -2,16 +2,21 @@ package no.novari.communication
 
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.jdbc.core.simple.JdbcClient
 import java.util.UUID
+import javax.sql.DataSource
 
 @IntegrationTest
 class DatabaseMigrationTest {
     @Autowired
     lateinit var jdbcClient: JdbcClient
+
+    @Autowired
+    lateinit var dataSource: DataSource
 
     @Test
     fun `flyway applies the baseline migration at startup`() {
@@ -115,6 +120,62 @@ class DatabaseMigrationTest {
                 .param("id", UUID.randomUUID())
                 .update()
         }.isInstanceOf(DataIntegrityViolationException::class.java)
+    }
+
+    @Test
+    fun `V6 moves queued messages into message`() {
+        val schema = "migration_v6"
+        val id = UUID.randomUUID()
+        try {
+            migrate(schema, "5")
+            jdbcClient
+                .sql(
+                    """
+                    INSERT INTO $schema.dispatch_queue
+                        (message_id, tenant, channel, template_id, status, next_attempt_at, received_at, payload)
+                    VALUES (:id, 'ROGALAND', 'EMAIL', 'team/varsel', 'PROCESSING', now(), '2026-11-01T10:00:00Z', '\\x00')
+                    """.trimIndent(),
+                ).param("id", id)
+                .update()
+
+            migrate(schema, "6")
+
+            val message =
+                jdbcClient
+                    .sql(
+                        """
+                        SELECT tenant, template_id, status,
+                            (received_at = '2026-11-01T10:00:00Z' AND updated_at = received_at)::text
+                        FROM $schema.message
+                        WHERE message_id = :id
+                        """.trimIndent(),
+                    ).param("id", id)
+                    .query { rs, _ -> listOf(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)) }
+                    .single()
+            val queued =
+                jdbcClient
+                    .sql("SELECT count(*) FROM $schema.dispatch_queue WHERE message_id = :id")
+                    .param("id", id)
+                    .query(Int::class.java)
+                    .single()
+            assertThat(message).containsExactly("ROGALAND", "team/varsel", "RECEIVED", "true")
+            assertThat(queued).isEqualTo(1)
+        } finally {
+            jdbcClient.sql("DROP SCHEMA IF EXISTS $schema CASCADE").update()
+        }
+    }
+
+    private fun migrate(
+        schema: String,
+        target: String,
+    ) {
+        Flyway
+            .configure()
+            .dataSource(dataSource)
+            .schemas(schema)
+            .target(target)
+            .load()
+            .migrate()
     }
 
     private fun insertMessage(
