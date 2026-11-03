@@ -33,30 +33,17 @@ class SendUsageRepository(
         }
     }
 
-    fun recipientSentTimesSince(
-        recipient: RecipientHash,
-        since: Instant,
-    ): List<Instant> =
-        sentTimes(since, "recipient_hash = :recipientHash AND", mapOf("recipientHash" to recipient.value))
-
-    fun tenantSentTimesSince(
-        tenant: Tenant,
-        since: Instant,
-    ): List<Instant> = sentTimes(since, "tenant = :tenant AND", mapOf("tenant" to tenant.name))
-
-    fun sentTimesSince(since: Instant): List<Instant> = sentTimes(since, "", emptyMap())
-
-    private fun sentTimes(
-        since: Instant,
-        filter: String,
-        params: Map<String, Any>,
-    ): List<Instant> =
+    fun usageSince(since: Instant): List<SendUsage> =
         jdbcClient
-            .sql("SELECT sent_at FROM send_usage WHERE $filter sent_at > :since ORDER BY sent_at")
-            .params(params)
+            .sql("SELECT recipient_hash, tenant, sent_at FROM send_usage WHERE sent_at > :since ORDER BY sent_at")
             .param("since", since.toOffsetDateTime())
-            .query { rs, _ -> rs.getObject("sent_at", OffsetDateTime::class.java).toInstant() }
-            .list()
+            .query { rs, _ ->
+                SendUsage(
+                    RecipientHash(rs.getString("recipient_hash")),
+                    Tenant.valueOf(rs.getString("tenant")),
+                    rs.getObject("sent_at", OffsetDateTime::class.java).toInstant(),
+                )
+            }.list()
 
     fun countPerTenantSince(
         hourAgo: Instant,
@@ -109,3 +96,9 @@ class SendUsageRepository(
         const val LOCK_NOT_AVAILABLE_SQL_STATE = "55P03"
     }
 }
+
+data class SendUsage(
+    val recipient: RecipientHash,
+    val tenant: Tenant,
+    val sentAt: Instant,
+)
