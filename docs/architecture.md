@@ -287,8 +287,7 @@ no.novari.communication
 │                        LimitExceededException, LimitProperties, LimitConfiguration,
 │                        SendUsageRepository, SendUsageCleaner
 ├── message/             MessageService, MessageStore, DatabaseMessageStore, StoredMessage,
-│   │                    MessageNotFoundException, MessageCleaner, MessageAccepted, MessageMetrics,
-│   │                    ReportOutcome
+│   │                    MessageNotFoundException, MessageCleaner, MessageAccepted, MessageMetrics
 │   ├── domain/          OutgoingMessage, MessagePayload, EmailPayload, MessageId,
 │   │                    MessageChannel, EmailAddress
 │   └── dispatch/        MessageDispatcher, QueueingMessageDispatcher, DispatchWorker,
@@ -873,7 +872,7 @@ sequenceDiagram
             Note over R,DB: Én transaksjon
             R->>DB: UPDATE message (bare fra RECEIVED eller SENT)
             R->>DB: upsert HARD_BOUNCE (forlenger, forkorter aldri) eller OPT_OUT
-            R-->>P: melding, endret, blokkert
+            R-->>P: melding, blokkert
             P->>Q: slett
         end
     end
@@ -1287,7 +1286,7 @@ Tjenesten har en egen Postgres-database, `fint-common`, som Flais setter opp fra
 
 - **Skrives** av `MessageService.receive` (INSERT før køraden), av `DispatchWorker` (sluttstatus
   i samme transaksjon som slettingen i køen, bare fra `RECEIVED`) og av `DeliveryReportProcessor`
-  (status fra en leveringsrapport, bare fra `RECEIVED` eller `SENT`, med `UPDATE … RETURNING`). Alle
+  (status fra en leveringsrapport, bare fra `RECEIVED` eller `SENT`). Alle
   går via porten `MessageStore`, som `DatabaseMessageStore` implementerer med `JdbcClient`.
 - **Ingen mottaker.** Tabellen har verken adresse, hash eller innhold. Leveringsrapportene
   knyttes til meldingen via ID-en, så det trengs ingen hash, og et bytte av hashing-nøkkelen

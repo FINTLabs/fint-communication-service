@@ -4,7 +4,6 @@ import no.novari.communication.blocklist.BlockReason
 import no.novari.communication.blocklist.BlockSource
 import no.novari.communication.blocklist.BlocklistRepository
 import no.novari.communication.message.MessageStore
-import no.novari.communication.message.ReportOutcome
 import no.novari.communication.recipient.RecipientHash
 import org.springframework.transaction.support.TransactionOperations
 import java.time.Clock
@@ -20,19 +19,15 @@ class DeliveryReportProcessor(
     fun process(report: DeliveryReport): ProcessedReport =
         checkNotNull(
             transactions.execute {
-                val outcome = applyStatus(report)
+                report.event.messageStatus?.let {
+                    messageStore.applyReport(report.messageId, it, report.event.failureReason, clock.instant())
+                }
                 val blockReason = report.event.blocks
                 val recipient = report.recipient?.takeIf { blockReason != null }
                 if (recipient != null && blockReason != null) block(recipient, blockReason, report)
                 ProcessedReport(
                     report = report,
-                    message =
-                        when (outcome) {
-                            is ReportOutcome.Applied -> outcome.message
-                            is ReportOutcome.Unchanged -> outcome.message
-                            ReportOutcome.NotFound -> null
-                        },
-                    changed = outcome is ReportOutcome.Applied,
+                    message = messageStore.find(report.messageId),
                     blocked = recipient != null,
                 )
             },
@@ -56,12 +51,5 @@ class DeliveryReportProcessor(
                 blocklist.blockOptOut(recipient, BlockSource.SES)
             }
         }
-    }
-
-    private fun applyStatus(report: DeliveryReport): ReportOutcome {
-        val status =
-            report.event.messageStatus
-                ?: return messageStore.find(report.messageId)?.let(ReportOutcome::Unchanged) ?: ReportOutcome.NotFound
-        return messageStore.applyReport(report.messageId, status, report.event.failureReason, clock.instant())
     }
 }

@@ -4,7 +4,6 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import no.novari.communication.TEST_RECIPIENT_HASHING_KEY
 import no.novari.communication.blocklist.BlocklistRepository
 import no.novari.communication.message.MessageStore
-import no.novari.communication.message.ReportOutcome
 import no.novari.communication.message.StoredMessage
 import no.novari.communication.message.domain.MessageChannel
 import no.novari.communication.message.domain.MessageId
@@ -210,11 +209,11 @@ class DeliveryReportPollerTest {
             status: MessageStatus,
             failureReason: FailureReason?,
             at: Instant,
-        ): ReportOutcome {
+        ) {
             failure?.let { throw it }
-            val message = messages[id] ?: return ReportOutcome.NotFound
+            val message = messages[id] ?: return
             applied += id to status
-            return ReportOutcome.Applied(message.copy(status = status, failureReason = failureReason, updatedAt = at))
+            messages[id] = message.copy(status = status, failureReason = failureReason, updatedAt = at)
         }
     }
 }

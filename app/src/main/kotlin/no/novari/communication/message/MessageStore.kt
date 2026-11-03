@@ -23,5 +23,5 @@ interface MessageStore {
         status: MessageStatus,
         failureReason: FailureReason?,
         at: Instant,
-    ): ReportOutcome
+    )
 }

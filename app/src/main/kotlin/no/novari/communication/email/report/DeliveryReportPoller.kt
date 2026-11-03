@@ -67,7 +67,7 @@ class DeliveryReportPoller(
         log.info {
             "Leveringsrapport id=${message.id.value} sesEvent=${report.event.value} status=${message.status} " +
                 "tenant=${message.tenant} channel=${message.channel} templateId=${message.templateId} " +
-                "endret=${processed.changed.yesNo()} blokkert=${processed.blocked.yesNo()}"
+                "blokkert=${processed.blocked.yesNo()}"
         }
     }
 
