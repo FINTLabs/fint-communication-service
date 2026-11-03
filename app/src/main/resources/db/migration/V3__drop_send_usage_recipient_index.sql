@@ -1,0 +1,1 @@
+DROP INDEX send_usage_recipient_sent_at;
