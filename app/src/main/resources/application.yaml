@@ -44,8 +44,6 @@ communication:
     usage-refresh: 60s
   email:
     provider: logging
-    ses:
-      region: eu-north-1
   dispatch:
     poll-interval: 2s
     batch-size: 10

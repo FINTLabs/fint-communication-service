@@ -38,8 +38,6 @@ class SesEmailAdapter(
             outcome(exception)
         } catch (exception: SdkClientException) {
             outcome(exception)
-        } catch (exception: RuntimeException) {
-            EmailSendOutcome.Retryable(RetryReason.UNEXPECTED, exception.javaClass.simpleName)
         }
 
     private fun EmailPayload.toSendEmailRequest(id: MessageId): SendEmailRequest =
