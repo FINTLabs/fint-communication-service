@@ -537,8 +537,7 @@ sequenceDiagram
         MC-->>C: 422 (transaksjonen rulles tilbake)
     else Ikke blokkert
         MS->>L: checkAndRecord(message, hash)
-        L->>DB: pg_advisory_xact_lock(hash)
-        L->>DB: pg_advisory_xact_lock(total)
+        L->>DB: pg_advisory_xact_lock(1, 0)
         L->>DB: tidspunkter siste 24 t for mottakeren, tenanten og totalt
         alt Grense overskredet
             L-->>MC: LimitExceededException
@@ -624,7 +623,7 @@ sequenceDiagram
 ```
 
 - **Utfall.** Adapteren kaster ikke feil, men returnerer `EmailSendOutcome`: `Sent`,
-  `Retryable(årsak, Retry-After)` eller `Permanent(årsak)`. Workeren logger utfallet og teller det.
+  `Retryable(årsak)` eller `Permanent(årsak)`. Workeren logger utfallet og teller det.
 
   | Utfall      | Brukes når                                                           | `reason`       |
   |-------------|----------------------------------------------------------------------|----------------|
@@ -1105,12 +1104,12 @@ En tenantgrense lavere enn mottakergrensen er tillatt.
 
 `send_usage` har én rad per akseptert melding:
 
-| Kolonne          | Innhold                                                               |
-|------------------|-----------------------------------------------------------------------|
-| `message_id`     | Meldings-ID (primærnøkkel).                                           |
-| `recipient_hash` | `RecipientHash`. Global, så alle tenants deler teller.                |
-| `tenant`         | Enum-navnet. Grensen per tenant teller på denne.                      |
-| `sent_at`        | Tidspunkt fra `Clock`, lest etter at låsene er tatt (se Samtidighet). |
+| Kolonne          | Innhold                                                              |
+|------------------|----------------------------------------------------------------------|
+| `message_id`     | Meldings-ID (primærnøkkel).                                          |
+| `recipient_hash` | `RecipientHash`. Global, så alle tenants deler teller.               |
+| `tenant`         | Enum-navnet. Grensen per tenant teller på denne.                     |
+| `sent_at`        | Tidspunkt fra `Clock`, lest etter at låsen er tatt (se Samtidighet). |
 
 | Indeks                                                     | Brukes av                     |
 |------------------------------------------------------------|-------------------------------|
@@ -1120,15 +1119,13 @@ En tenantgrense lavere enn mottakergrensen er tillatt.
 
 - **Rekkefølge.** Mottaker → tenant → total. Alle tre telles, og forbruket registreres bare når
   ingen er brutt.
-- **Samtidighet.** `DatabaseSendLimiter` tar først `pg_advisory_xact_lock` på de første 64 bitene av
-  hashen, så en global lås (`pg_advisory_xact_lock(1, 0)`, et eget nøkkelrom som ikke kan kollidere
-  med mottakernøklene). Den globale låsen gjør at alle innsendinger, også fra flere pods, går etter
-  hverandre, og dekker dermed både tenant- og totalgrensen; en egen lås per tenant ville ikke gitt
-  noe ekstra. Ved noen hundre meldinger i timen og en kort transaksjon koster det ingenting. Låsene
-  tas alltid i samme rekkefølge, så det kan ikke oppstå vranglås. De slippes ved commit eller
+- **Samtidighet.** `DatabaseSendLimiter` tar en global lås (`pg_advisory_xact_lock(1, 0)`). Den gjør
+  at alle innsendinger, også fra flere pods, går etter hverandre, og dekker dermed alle tre grensene;
+  egne låser per mottaker eller tenant ville ikke gitt noe ekstra. Ved noen hundre meldinger i timen
+  og en kort transaksjon koster det ingenting. Låsen slippes ved commit eller
   rollback, og venter høyst 5 sekunder (`lock_timeout`, gir 503). Tidspunktet som brukes til
-  vinduene og lagres i `sent_at`, leses først når låsene er tatt, ikke `receivedAt`. Ellers kunne en
-  forespørsel som ventet på en lås, bli avvist for forbruk som allerede hadde gått ut av vinduet,
+  vinduene og lagres i `sent_at`, leses først når låsen er tatt, ikke `receivedAt`. Ellers kunne en
+  forespørsel som ventet på låsen, bli avvist for forbruk som allerede hadde gått ut av vinduet,
   eller bli registrert for tidlig, slik at neste melding slapp gjennom før det var gått et helt vindu.
 - **Retry-After.** For hvert vindu som er brutt, er neste ledige tidspunkt når raden nummer
   `antall − grense` (eldste først) faller ut av vinduet. Er flere grenser brutt, får svaret grensen
@@ -1136,7 +1133,7 @@ En tenantgrense lavere enn mottakergrensen er tillatt.
   i rekkefølgen. Svaret er i hele sekunder rundet opp, minst 1.
 - **Transaksjon.** Låser, telling, registrering og dispatch (INSERT i `dispatch_queue`) skjer i samme
   transaksjon (`MessageService.receive`). En avvist melding etterlater ingen rad, verken i
-  `send_usage` eller i køen. Kallet til leverandøren skjer etter commit og holder ikke låsene.
+  `send_usage` eller i køen. Kallet til leverandøren skjer etter commit og holder ikke låsen.
 - **Opprydning.** `SendUsageCleaner` sletter rader eldre enn 24 timer.
 - **Metrikker.** `DatabaseSendLimiter` øker `communication.limit.rejected` (tagger `limit` og `tenant`)
   ved hver 429. `MessageMetrics` øker `communication.message.accepted` (tagger `tenant` og `channel`)
@@ -1190,7 +1187,7 @@ Listen er global (på tvers av tenants) og lagrer bare `RecipientHash`.
   ny verdi, så en blokkering forlenges, men aldri forkortes.
 - **Oppslag.** `DatabaseRecipientBlocklist` spør om det finnes en rad for hashen med
   `expires_at IS NULL` eller `expires_at > now`, der `now` er mottakstidspunktet fra `Clock`. Utløpte
-  rader ignoreres. Oppslaget skjer i transaksjonen til `MessageService.receive`, før grenselåsene.
+  rader ignoreres. Oppslaget skjer i transaksjonen til `MessageService.receive`, før grenselåsen.
 - **Avvisning.** Blokkert gir `RecipientBlockedException` og `422`. Transaksjonen rulles tilbake, så
   meldingen verken lagres eller teller mot grensene. Svaret og loggen har ikke årsaken.
 - **Metrikk.** Telleren `communication.blocklist.rejected` øker for hver avvisning, med `tenant` som
@@ -1312,12 +1309,11 @@ også på hver replika, og `SKIP LOCKED` fordeler meldingene mellom dem.
 | Mottakere lagres som HMAC-SHA256 med hemmelig nøkkel, ikke ren SHA-256.                                             | E-postadresser er lette å gjette; uten nøkkelen kan hashen ikke slås opp mot en liste med adresser.                                                              |
 | Ingen nøkkelrotasjon og ingen `key_id` i blokkeringslisten.                                                         | Et nøkkelbytte krever at blokkeringslisten bygges opp på nytt. `key_id` alene hjelper ikke uten oppslag med flere nøkler, og kan legges til med en migrering.    |
 | Opprydning uten ShedLock.                                                                                           | Slettingene er idempotente; samtidige kjøringer på flere replikaer gjør ingen skade.                                                                             |
-| Grenser med `pg_advisory_xact_lock` på mottaker-hashen og en global lås.                                            | Atomisk på tvers av pods uten retry-logikk eller egen låsetabell.                                                                                                |
+| Grenser med én global `pg_advisory_xact_lock`, ingen lås per mottaker eller tenant.                                 | Atomisk på tvers av pods uten retry-logikk eller egen låsetabell; ved noen hundre meldinger i timen koster serialiseringen ingenting.                            |
 | Én rad per akseptert melding i `send_usage`, ikke aggregerte bøtter.                                                | Ekte glidende vindu og eksakt `Retry-After`; få rader ved disse volumene.                                                                                        |
 | Forbruk og dispatch (INSERT i køen) i samme transaksjon.                                                            | En melding som ikke ble akseptert, teller ikke, så klientens nye forsøk straffes ikke, og en melding i køen er alltid talt med.                                  |
 | Fail-closed: databasen utilgjengelig gir 503.                                                                       | Grensene kan ikke omgås ved at databasen er nede.                                                                                                                |
 | Override per tenant må ha både `per-hour` og `per-day`, og ingen tenantgrense kan overstige totalgrensen.           | Ingen fletting med `default` å holde rede på; en tenantgrense over totalen ville aldri slått inn og er trolig en feil.                                           |
-| Én global advisory lock (etter mottakerlåsen) i stedet for egen lås per tenant.                                     | Totalgrensen krever at alle innsendinger serialiseres; ved noen hundre meldinger i timen koster det ingenting.                                                   |
 | Ved flere brudde grenser rapporteres den med lengst `Retry-After`.                                                  | Typen og ventetiden stemmer overens, og klienten får ikke ny 429 etter å ha ventet.                                                                              |
 | Blokkeringslisten sjekkes før grensene.                                                                             | En blokkert melding skal ikke bruke av mottakerens, tenantens eller totalens kvote.                                                                              |
 | Blokkeringslisten har én rad per hash og årsak.                                                                     | Opt-out og hard bounce lever uavhengig; en ny bounce kan forlenges uten å gjøre en opt-out midlertidig.                                                          |
@@ -1336,7 +1332,7 @@ også på hver replika, og `SKIP LOCKED` fordeler meldingene mellom dem.
 | Ingen gauge for mottakergrensen.                                                                                    | Én serie per mottaker er ikke mulig (kardinalitet og personvern); avvisningene telles med `limit="mottaker"`.                                                    |
 | Aksepterte meldinger telles etter commit.                                                                           | En melding som rulles tilbake (f.eks. feil i dispatch), er ikke akseptert og skal ikke telles.                                                                   |
 | Varselreglene dokumenteres i runbooken og registreres manuelt i Grafana Alerts.                                     | Ingen tjenester i clusteret leverer varselregler fra repoet; tabellen i runbooken er kilden og gjennomgås i PR.                                                  |
-| Utsending via kø-tabell i Postgres og en poller med `FOR UPDATE SKIP LOCKED`, ikke via en tråd etter commit.        | Meldinger med `202` overlever restart, flere replikaer deler køen, og kallet til leverandøren holder ikke grenselåsene. Ingen ny infrastruktur.                  |
+| Utsending via kø-tabell i Postgres og en poller med `FOR UPDATE SKIP LOCKED`, ikke via en tråd etter commit.        | Meldinger med `202` overlever restart, flere replikaer deler køen, og kallet til leverandøren holder ikke grenselåsen. Ingen ny infrastruktur.                   |
 | Innholdet i køen krypteres med en egen nøkkel.                                                                      | Adresser lagres aldri i klartekst, heller ikke de minuttene en melding venter. Egen nøkkel, siden hashing-nøkkelen har et annet formål og ikke kan roteres.      |
 | Køen er en arbeidskø; raden slettes ved `SENT` og `FAILED`.                                                         | Status per melding ligger i `message`; køen holdes liten og uten innhold lenger enn nødvendig.                                                                   |
 | Feil nøkkel hos leverandøren regnes som forbigående.                                                                | Skyldes konfig, ikke meldingen; meldingene sendes når nøkkelen er rettet innen forsøkene er brukt opp.                                                           |

@@ -184,7 +184,7 @@ class RecipientLimitIntegrationTest {
         val executor = Executors.newSingleThreadExecutor()
         try {
             val result =
-                holdingRecipientLock {
+                holdingLock {
                     clock.set(START.plus(Duration.ofHours(1)).minusSeconds(1))
                     val pending = executor.submit(Callable { runCatching { sendPayload(ADDRESS, Tenant.ROGALAND) } })
                     awaitLockWaiter()
@@ -200,8 +200,8 @@ class RecipientLimitIntegrationTest {
     }
 
     @Test
-    fun `the recipient lock not being granted in time gives service unavailable`() {
-        holdingRecipientLock {
+    fun `the lock not being granted in time gives service unavailable`() {
+        holdingLock {
             send().andExpect {
                 status { isServiceUnavailable() }
                 jsonPath("$.detail") { value("Tjenesten er midlertidig utilgjengelig") }
@@ -269,13 +269,10 @@ class RecipientLimitIntegrationTest {
         EmailPayload(templateId = "team/varsel", to = to, subject = "Emne", body = "Innhold"),
     )
 
-    private fun <T> holdingRecipientLock(block: () -> T): T =
+    private fun <T> holdingLock(block: () -> T): T =
         dataSource.connection.use { connection ->
             connection.autoCommit = false
-            connection.prepareStatement("SELECT pg_advisory_xact_lock(?)").use { statement ->
-                statement.setLong(1, java.lang.Long.parseUnsignedLong(hasher.hash(ADDRESS).value.take(16), 16))
-                statement.execute()
-            }
+            connection.createStatement().use { it.execute("SELECT pg_advisory_xact_lock(1, 0)") }
             try {
                 block()
             } finally {
