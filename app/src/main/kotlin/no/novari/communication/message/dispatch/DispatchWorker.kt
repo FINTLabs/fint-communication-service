@@ -14,7 +14,6 @@ import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 import org.springframework.transaction.support.TransactionOperations
 import java.time.Clock
-import java.time.Duration
 
 @Component
 class DispatchWorker(
@@ -82,7 +81,7 @@ class DispatchWorker(
         if (message.attempts >= properties.maxAttempts) {
             return failed(message, FailureReason.RETRIES_EXHAUSTED, "${outcome.reason.value} ${outcome.detail}")
         }
-        val delay = maxOf(properties.backoffAfter(message.attempts), outcome.retryAfter ?: Duration.ZERO)
+        val delay = properties.backoffAfter(message.attempts)
         if (!repository.reschedule(message, clock.instant() + delay)) return logLeaseLost(message)
         metrics.retried(message, outcome.reason)
         log.warn {
