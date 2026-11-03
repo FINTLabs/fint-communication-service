@@ -64,7 +64,7 @@ class DispatchQueueRepository(
             .query { rs, _ -> rs.toQueuedMessage() }
             .list()
 
-    // attempts skiller dette forsøket fra et senere forsøk på en annen replika etter at leasen gikk ut.
+    // attempts tells this attempt apart from a later one on another replica after the lease expired.
     fun reschedule(
         message: QueuedMessage,
         nextAttemptAt: Instant,

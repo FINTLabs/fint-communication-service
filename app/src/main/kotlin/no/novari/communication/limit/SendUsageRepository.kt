@@ -23,7 +23,7 @@ class SendUsageRepository(
             .query {}
     }
 
-    // Spring oversetter ikke lock_not_available, så uten dette ville lock timeout gitt 500 i stedet for 503.
+    // Spring does not translate lock_not_available, so without this a lock timeout would return 500 instead of 503.
     fun lock() {
         try {
             jdbcClient.sql("SELECT pg_advisory_xact_lock(:key, 0)").param("key", LOCK_KEY).query {}
