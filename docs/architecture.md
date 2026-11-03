@@ -538,7 +538,7 @@ sequenceDiagram
     else Ikke blokkert
         MS->>L: checkAndRecord(message, hash)
         L->>DB: pg_advisory_xact_lock(1, 0)
-        L->>DB: tidspunkter siste 24 t for mottakeren, tenanten og totalt
+        L->>DB: alle rader i send_usage siste 24 t
         alt Grense overskredet
             L-->>MC: LimitExceededException
             MC-->>C: 429 + Retry-After (transaksjonen rulles tilbake)
@@ -977,14 +977,14 @@ Tjenesten har en egen Postgres-database, `fint-common`, som Flais setter opp fra
 |------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Tilgang    | Spring Data JDBC. Egen SQL skrives med `JdbcClient`.                                                                                                                                                                                                                                                      |
 | Skjema     | Flyway, `classpath:db/migration`, kjøres ved oppstart. `V1__baseline` er tom.                                                                                                                                                                                                                             |
-| Tabeller   | `send_usage` (`V2`, indeks per tenant i `V3`): forbruk for grensene. `recipient_blocklist` (`V4`): blokkeringslisten. `dispatch_queue` (`V5`): meldinger som venter på å bli sendt. `message` (`V6`): status per melding.                                                                                 |
+| Tabeller   | `send_usage` (`V2`): forbruk for grensene. `recipient_blocklist` (`V3`): blokkeringslisten. `dispatch_queue` (`V4`): meldinger som venter på å bli sendt. `message` (`V5`): status per melding.                                                                                                           |
 | Readiness  | `db` er med i readiness-gruppen; podden tas ut av trafikk når databasen ikke svarer.                                                                                                                                                                                                                      |
 | Opprydning | `RetentionCleanupJob` kjører kl. 03.15 (Europe/Oslo) og kaller hver `ExpiredRowsCleaner`.                                                                                                                                                                                                                 |
 | Retensjon  | Status per melding (`message`) beholdes i 60 dager etter mottak (`communication.retention.metadata`). `send_usage` beholdes i 24 timer. Utløpte blokkeringer slettes ved neste opprydning; `OPT_OUT` slettes aldri automatisk. En rad i `dispatch_queue` slettes når meldingen er sendt eller har feilet. |
 
 ### Meldingstabell
 
-`message` (`V6`) har én rad per akseptert melding, fra mottak til den slettes etter 60 dager:
+`message` (`V5`) har én rad per akseptert melding, fra mottak til den slettes etter 60 dager:
 
 | Kolonne                            | Innhold                                                                                          |
 |------------------------------------|--------------------------------------------------------------------------------------------------|
@@ -1007,7 +1007,7 @@ Tjenesten har en egen Postgres-database, `fint-common`, som Flais setter opp fra
 
 ### Utsendingskø
 
-`dispatch_queue` (`V5`) har én rad per akseptert melding som ikke er sendt eller har
+`dispatch_queue` (`V4`) har én rad per akseptert melding som ikke er sendt eller har
 feilet ennå. Den har bare det køen trenger; tenant, kanal, mal og mottakstidspunkt ligger i `message`:
 
 | Kolonne           | Innhold                                                                           |
@@ -1111,12 +1111,13 @@ En tenantgrense lavere enn mottakergrensen er tillatt.
 | `tenant`         | Enum-navnet. Grensen per tenant teller på denne.                     |
 | `sent_at`        | Tidspunkt fra `Clock`, lest etter at låsen er tatt (se Samtidighet). |
 
-| Indeks                                                     | Brukes av                     |
-|------------------------------------------------------------|-------------------------------|
-| `send_usage_recipient_sent_at` (`recipient_hash, sent_at`) | Grensen per mottaker.         |
-| `send_usage_tenant_sent_at` (`tenant, sent_at`, `V3`)      | Grensen per tenant.           |
-| `send_usage_sent_at` (`sent_at`)                           | Totalgrensen og opprydningen. |
+| Indeks                           | Brukes av                 |
+|----------------------------------|---------------------------|
+| `send_usage_sent_at` (`sent_at`) | Grensene og opprydningen. |
 
+- **Telling.** Alle rader for siste 24 timer hentes med én spørring og filtreres på mottaker og
+  tenant i koden. Det er høyst totalgrensen per døgn med rader, så egne indekserte spørringer per
+  grense ville ikke gitt noe.
 - **Rekkefølge.** Mottaker → tenant → total. Alle tre telles, og forbruket registreres bare når
   ingen er brutt.
 - **Samtidighet.** `DatabaseSendLimiter` tar en global lås (`pg_advisory_xact_lock(1, 0)`). Den gjør
@@ -1165,7 +1166,7 @@ Listen er global (på tvers av tenants) og lagrer bare `RecipientHash`.
 | `OPT_OUT`     | Ingen. Fjernes manuelt.     | Driftsrutinen (SQL). Avmeldingslenke: FFS-2340.                    |
 | `HARD_BOUNCE` | 30 dager etter siste bounce | Driftsrutinen (SQL). Automatisk fra leveringsrapportene: FFS-2379. |
 
-`recipient_blocklist` (`V4`):
+`recipient_blocklist` (`V3`):
 
 | Kolonne          | Innhold                                                       |
 |------------------|---------------------------------------------------------------|
