@@ -45,13 +45,8 @@ communication:
   email:
     provider: logging
     delivery-reports:
-      enabled: false
       poll-interval: 10s
-      batch-size: 10
-      visibility-timeout: 5m
-      max-receive-count: 5
       queue-metrics-refresh: 60s
-      block-for: 30d
   dispatch:
     poll-interval: 2s
     batch-size: 10
