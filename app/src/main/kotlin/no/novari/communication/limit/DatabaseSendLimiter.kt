@@ -21,8 +21,7 @@ class DatabaseSendLimiter(
     private val recipientLimits = properties.recipient.slidingWindows()
     private val totalLimits = properties.total.slidingWindows()
 
-    // Låsen slippes først ved commit, så kallerens transaksjon må også dekke dispatch.
-    // Den serialiserer alle innsendinger og dekker dermed alle tre grensene.
+    // The lock is released only on commit, so the caller's transaction must also cover dispatch.
     @Transactional(propagation = Propagation.MANDATORY)
     override fun checkAndRecord(
         message: OutgoingMessage,
@@ -30,7 +29,7 @@ class DatabaseSendLimiter(
     ) {
         repository.setLockTimeout(LOCK_TIMEOUT)
         repository.lock()
-        // Leses etter låsen: receivedAt kan være flere sekunder gammelt hvis forespørselen ventet på låsen.
+        // Read after the lock: receivedAt can be several seconds old if the request waited for the lock.
         val now = clock.instant()
         val usage = repository.usageSince(now - DAY)
         val exceeded =
