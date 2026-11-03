@@ -1,14 +1,11 @@
 package no.novari.communication.email
 
-import java.time.Duration
-
 sealed interface EmailSendOutcome {
     data object Sent : EmailSendOutcome
 
     data class Retryable(
         val reason: RetryReason,
         val detail: String,
-        val retryAfter: Duration? = null,
     ) : EmailSendOutcome
 
     data class Permanent(

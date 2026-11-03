@@ -519,7 +519,7 @@ sequenceDiagram
 ```
 
 - **Utfall.** Adapteren kaster ikke feil, men returnerer `EmailSendOutcome`: `Sent`,
-  `Retryable(årsak, Retry-After)` eller `Permanent(årsak)`. Workeren logger utfallet og teller det.
+  `Retryable(årsak)` eller `Permanent(årsak)`. Workeren logger utfallet og teller det.
 
   | Utfall      | Brukes når                                                                      | `reason`            |
   |-------------|---------------------------------------------------------------------------------|---------------------|
