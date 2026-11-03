@@ -977,7 +977,7 @@ Tjenesten har en egen Postgres-database, `fint-common`, som Flais setter opp fra
 |------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Tilgang    | Spring Data JDBC. Egen SQL skrives med `JdbcClient`.                                                                                                                                                                                                                                                      |
 | Skjema     | Flyway, `classpath:db/migration`, kjøres ved oppstart. `V1__baseline` er tom.                                                                                                                                                                                                                             |
-| Tabeller   | `send_usage` (`V2`, indeks per tenant i `V3`): forbruk for grensene. `recipient_blocklist` (`V4`): blokkeringslisten. `dispatch_queue` (`V5`, bare køfelt fra `V6`): meldinger som venter på å bli sendt. `message` (`V6`): status per melding.                                                           |
+| Tabeller   | `send_usage` (`V2`, indeks per tenant i `V3`): forbruk for grensene. `recipient_blocklist` (`V4`): blokkeringslisten. `dispatch_queue` (`V5`): meldinger som venter på å bli sendt. `message` (`V6`): status per melding.                                                                                 |
 | Readiness  | `db` er med i readiness-gruppen; podden tas ut av trafikk når databasen ikke svarer.                                                                                                                                                                                                                      |
 | Opprydning | `RetentionCleanupJob` kjører kl. 03.15 (Europe/Oslo) og kaller hver `ExpiredRowsCleaner`.                                                                                                                                                                                                                 |
 | Retensjon  | Status per melding (`message`) beholdes i 60 dager etter mottak (`communication.retention.metadata`). `send_usage` beholdes i 24 timer. Utløpte blokkeringer slettes ved neste opprydning; `OPT_OUT` slettes aldri automatisk. En rad i `dispatch_queue` slettes når meldingen er sendt eller har feilet. |
@@ -1007,7 +1007,7 @@ Tjenesten har en egen Postgres-database, `fint-common`, som Flais setter opp fra
 
 ### Utsendingskø
 
-`dispatch_queue` (`V5`, endret i `V6`) har én rad per akseptert melding som ikke er sendt eller har
+`dispatch_queue` (`V5`) har én rad per akseptert melding som ikke er sendt eller har
 feilet ennå. Den har bare det køen trenger; tenant, kanal, mal og mottakstidspunkt ligger i `message`:
 
 | Kolonne           | Innhold                                                                           |
