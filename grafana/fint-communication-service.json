@@ -207,7 +207,7 @@
       "gridPos": {
         "x": 0,
         "y": 8,
-        "w": 12,
+        "w": 24,
         "h": 8
       },
       "fieldConfig": {
@@ -246,60 +246,6 @@
           },
           "expr": "sum by (limit, tenant) (increase(communication_limit_rejected_total{app=\"fint-communication-service\", tenant=~\"$tenant\"}[5m]))",
           "legendFormat": "{{limit}} {{tenant}}"
-        }
-      ]
-    },
-    {
-      "id": 4,
-      "type": "timeseries",
-      "title": "Blokkerte innsendinger (422)",
-      "description": "Innsendinger til mottakere på blokkeringslisten, per tenant, per 5 minutter.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 8,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 10,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "calcs": [
-            "max",
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (tenant) (increase(communication_blocklist_rejected_total{app=\"fint-communication-service\", tenant=~\"$tenant\"}[5m]))",
-          "legendFormat": "{{tenant}}"
         }
       ]
     },
