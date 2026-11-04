@@ -1487,8 +1487,8 @@ Listen er global (på tvers av tenants) og lagrer bare `RecipientHash`.
 - **Avvisning.** Blokkert gir `RecipientBlockedException` og `422`. Transaksjonen rulles tilbake, så
   meldingen verken lagres eller teller mot grensene. Svaret og loggen har ikke årsaken.
 - **Metrikk.** Telleren `communication.blocklist.rejected` øker for hver avvisning, med `tenant` som
-  eneste tag. Den scrapes av Prometheus som `communication_blocklist_rejected_total`. Varselet og hva
-  vakthavende gjør står i [runbooken](runbook.md#mange-blokkerte-innsendinger).
+  eneste tag. Den scrapes av Prometheus som `communication_blocklist_rejected_total`. Den varsles ikke; se
+  [runbooken](runbook.md#uten-varsel).
 - **Opprydning.** `BlocklistCleaner` sletter rader med `expires_at <= now` i den nattlige
   opprydningen. `OPT_OUT` har ikke utløp og slettes aldri automatisk.
 - **Fail-closed.** Er databasen utilgjengelig, blir det `503`, som for grensene.

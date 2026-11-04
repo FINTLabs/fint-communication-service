@@ -11,23 +11,17 @@ blokkeringslisten er beskrevet i [README](../README.md#grenser) og
 1. [Metrikker](#metrikker)
 2. [Varselregler](#varselregler)
 3. [Første steg ved alle varsler](#første-steg-ved-alle-varsler)
-4. [Høy utnyttelse](#høy-utnyttelse)
-5. [Tenantgrense nådd](#tenantgrense-nådd)
-6. [Totalgrense nådd](#totalgrense-nådd)
-7. [Mange mottaker-429](#mange-mottaker-429)
-8. [Mange blokkerte innsendinger](#mange-blokkerte-innsendinger)
-9. [Meldinger feilet](#meldinger-feilet)
-10. [Køen står](#køen-står)
-11. [Høy bounce-rate](#høy-bounce-rate)
-12. [Klager](#klager)
-13. [Rapporter forkastet](#rapporter-forkastet)
-14. [Rapportkøen vokser](#rapportkøen-vokser)
-15. [Mottak av rapporter feiler](#mottak-av-rapporter-feiler)
-16. [Slå opp en melding](#slå-opp-en-melding)
-17. [Justere grenser](#justere-grenser)
-18. [Testvarsel](#testvarsel)
-19. [Verifisere utsending](#verifisere-utsending)
-20. [Verifisere leveringsrapporter](#verifisere-leveringsrapporter)
+4. [Grense nådd](#grense-nådd)
+5. [Meldinger feilet](#meldinger-feilet)
+6. [Køen står](#køen-står)
+7. [Høy bounce-rate](#høy-bounce-rate)
+8. [Mottak av rapporter feiler](#mottak-av-rapporter-feiler)
+9. [Uten varsel](#uten-varsel)
+10. [Slå opp en melding](#slå-opp-en-melding)
+11. [Justere grenser](#justere-grenser)
+12. [Testvarsel](#testvarsel)
+13. [Verifisere utsending](#verifisere-utsending)
+14. [Verifisere leveringsrapporter](#verifisere-leveringsrapporter)
 
 ## Metrikker
 
@@ -63,27 +57,16 @@ Varslene registreres manuelt i Grafana Alerts med metrikkene, tersklene og varig
 Tabellen er kilden: endres en regel i Grafana, oppdateres den her også.
 `$app` står for `app="fint-communication-service"`.
 
-| Varsel                       | Uttrykk                                                                                                                                                                                                                                                  | I minst | Alvorlighet |
-|------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|-------------|
-| Høy utnyttelse, tenant       | `max by (tenant, window) (communication_limit_tenant_usage_ratio{$app}) > 0.8`                                                                                                                                                                           | 5m      | warning     |
-| Høy utnyttelse, total        | `max by (window) (communication_limit_total_usage_ratio{$app}) > 0.8`                                                                                                                                                                                    | 5m      | warning     |
-| Tenantgrense nådd            | `sum by (tenant) (increase(communication_limit_rejected_total{$app, limit="tenant"}[5m])) > 0`                                                                                                                                                           | –       | warning     |
-| Totalgrense nådd             | `sum (increase(communication_limit_rejected_total{$app, limit="total"}[5m])) > 0`                                                                                                                                                                        | –       | critical    |
-| Mange mottaker-429           | `sum by (tenant) (increase(communication_limit_rejected_total{$app, limit="mottaker"}[1h])) > 10`                                                                                                                                                        | –       | warning     |
-| Mange blokkerte innsendinger | `sum by (tenant) (increase(communication_blocklist_rejected_total{$app}[1h])) > 10`                                                                                                                                                                      | –       | warning     |
-| Meldinger feilet             | `sum by (tenant, reason) (increase(communication_message_failed_total{$app}[15m])) > 0`                                                                                                                                                                  | –       | warning     |
-| Køen står                    | `max(communication_dispatch_queue_oldest_seconds{$app}) > 900`                                                                                                                                                                                           | 5m      | critical    |
-| Høy bounce-rate              | `sum(increase(communication_delivery_report_received_total{$app, status="BOUNCED"}[1h])) / sum(increase(communication_delivery_report_received_total{$app}[1h])) > 0.05 and sum(increase(communication_delivery_report_received_total{$app}[1h])) >= 20` | –       | warning     |
-| Klager                       | `sum(increase(communication_delivery_report_received_total{$app, status="COMPLAINED"}[1d])) / sum(increase(communication_delivery_report_received_total{$app, status="DELIVERED"}[1d])) > 0.001`                                                         | –       | warning     |
-| Rapporter forkastet          | `sum(increase(communication_delivery_report_discarded_total{$app, reason="poison"}[15m])) > 0`                                                                                                                                                           | –       | warning     |
-| Rapportkøen vokser           | `max(communication_delivery_report_queue_size{$app}) > 1000`                                                                                                                                                                                             | 15m     | warning     |
-| Mottak av rapporter feiler   | `sum(increase(communication_delivery_report_poll_failed_total{$app}[5m])) > 0`                                                                                                                                                                           | 15m     | warning     |
+| Varsel                     | Uttrykk                                                                                                                                                                                                                                                  | I minst | Alvorlighet |
+|----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|-------------|
+| Grense nådd                | `sum by (tenant, limit) (increase(communication_limit_rejected_total{$app, limit=~"tenant\|total"}[5m])) > 0`                                                                                                                                            | –       | critical    |
+| Meldinger feilet           | `sum by (tenant, reason) (increase(communication_message_failed_total{$app}[15m])) > 0`                                                                                                                                                                  | –       | warning     |
+| Køen står                  | `max(communication_dispatch_queue_oldest_seconds{$app}) > 900`                                                                                                                                                                                           | 5m      | critical    |
+| Høy bounce-rate            | `sum(increase(communication_delivery_report_received_total{$app, status="BOUNCED"}[1h])) / sum(increase(communication_delivery_report_received_total{$app}[1h])) > 0.05 and sum(increase(communication_delivery_report_received_total{$app}[1h])) >= 20` | –       | warning     |
+| Mottak av rapporter feiler | `sum(increase(communication_delivery_report_poll_failed_total{$app}[5m])) > 0`                                                                                                                                                                           | 15m     | warning     |
 
-Alle avvisninger på tenant- og totalgrensen varsles, siden de betyr at meldinger ikke blir sendt. Det
-samme gjelder alle meldinger som feiler etter `202`, siden konsumenten ikke får vite om det (meldingsstatus
-kommer i FFS-2337).
-Avvisninger på mottakergrensen er forventet i små mengder (en konsument som sender flere varsler til
-samme person), så de varsles først over 10 per time per tenant.
+Varslene dekker bare det som betyr at meldinger ikke blir sendt, eller at avsenderen risikerer å bli
+satt på pause hos SES. Resten står på dashboardet og i [Uten varsel](#uten-varsel).
 
 ## Første steg ved alle varsler
 
@@ -108,70 +91,25 @@ samme person), så de varsles først over 10 per time per tenant.
 4. Finn ut hvilken konsument som sender for tenanten. Tenant oppgis i requesten, så inntil
    autentisering er på plass (FFS-1970) kan det være flere applikasjoner bak samme tenant.
 
-## Høy utnyttelse
+## Grense nådd
 
-**Betyr:** en tenant eller totalen har brukt over 80 % av grensen i siste time eller siste døgn.
-Ingenting er avvist ennå.
+**Betyr:** meldinger avvises med `429`. Med `limit: "tenant"` gjelder det bare én tenant; med
+`limit: "total"` avvises alle tenants. Konsumenten får `Retry-After` og må prøve igjen senere.
 
 **Sannsynlige årsaker:** legitim vekst (ny konsument, ny mal, et fylke med mange varsler), en
 konsument med feil (løkke, retry uten backoff) eller en kompromittert konsument.
 
 **Gjør:**
 
-- Sammenlign med aksepterte meldinger over tid: jevn vekst tyder på legitim bruk, en brå topp på feil.
-- Ved feil eller mistanke om kompromittering: kontakt teamet som eier konsumenten.
-- Ved legitim vekst: vurder å [justere grensen](#justere-grenser) før den nås.
-
-## Tenantgrense nådd
-
-**Betyr:** meldinger fra tenanten avvises med `429` og `limit: "tenant"`. Andre tenants kan fortsatt
-sende. Konsumenten får `Retry-After` og må prøve igjen senere.
-
-**Gjør:**
-
-- Som for høy utnyttelse, men raskere: meldinger går tapt hvis konsumenten ikke prøver igjen.
+- Finn tenanten som står for forbruket (dashboardet eller SQL-en over). Ved totalgrensen er det ofte én
+  tenant som også har nådd sin egen grense. Utnyttelsen på dashboardet viser om det har bygget seg opp
+  over tid (legitim vekst) eller kom brått (feil).
+- Ved feil eller mistanke om kompromittering: kontakt teamet som eier konsumenten, og vurder å senke
+  grensen for tenanten med en override, slik at de andre slipper til.
 - Grensen slipper av seg selv når de eldste meldingene glir ut av vinduet (senest etter 1 time for
   timegrensen og 24 timer for døgngrensen). Det trengs ingen opprydning.
 - Er trafikken legitim og haster det, [øk grensen](#justere-grenser) for tenanten med en override.
-
-## Totalgrense nådd
-
-**Betyr:** alle tenants avvises med `429` og `limit: "total"`. Tjenesten sender ingenting før vinduet
-har glidd.
-
-**Gjør:**
-
-- Finn tenanten som står for mesteparten av forbruket (dashboardet eller SQL-en over). Ofte er det én
-  tenant som også har nådd sin egen grense.
-- Mistanke om kompromittering: kontakt teamet som eier konsumenten, og vurder å senke grensen for
-  tenanten med en override, slik at de andre slipper til.
-- Legitim økning: totalgrensen er satt for å holde kostnaden under kontroll. Avklar en økning med PO
-  før den gjøres.
-
-## Mange mottaker-429
-
-**Betyr:** over 10 meldinger per time fra en tenant er avvist fordi samme mottaker har fått for mange
-(10 per time, 40 per døgn).
-
-**Sannsynlige årsaker:** en konsument som sender ett varsel per hendelse i stedet for en
-oppsummering, eller som ignorerer `429` og prøver igjen uten å vente.
-
-**Gjør:** kontakt teamet som eier konsumenten. Mottakergrensen økes ikke uten at fylket eller
-mottakeren uttrykkelig har gitt tillatelse.
-
-## Mange blokkerte innsendinger
-
-**Betyr:** over 10 meldinger per time fra en tenant er avvist med `422` fordi mottakeren har meldt
-seg av eller hard-bouncet.
-
-**Sannsynlige årsaker:** konsumenten håndterer ikke `422` og fortsetter å sende til samme mottaker,
-eller en mottakerliste har mange døde adresser.
-
-**Gjør:**
-
-- Kontakt teamet som eier konsumenten. `422` betyr at et nytt forsøk ikke hjelper.
-- Hvis en mottaker er blokkert ved en feil, fjernes blokkeringen med
-  [driftsrutinen for blokkeringslisten](../README.md#driftsrutine-for-blokkeringslisten).
+  Totalgrensen holder kostnaden under kontroll; avklar en økning av den med PO.
 
 ## Meldinger feilet
 
@@ -235,43 +173,6 @@ under vurdering ved 5 % og kan sette sendingen på pause ved 10 % («Reputation 
 - Kontakt teamet som eier konsumenten. Tjenesten har ikke adressene; konsumenten må finne dem via
   meldings-ID-ene i sitt eget system.
 
-## Klager
-
-**Betyr:** mer enn 0,1 % av de leverte meldingene siste døgn har fått en klage (mottakeren har merket
-den som spam). Mottakerne blokkeres som opt-out. AWS setter kontoen under vurdering ved 0,1 % og kan
-sette sendingen på pause ved 0,5 %.
-
-**Finn årsaken:** `sum by (tenant, template) (increase(communication_delivery_report_received_total{$app, status="COMPLAINED"}[1d]))`
-viser tenant og mal. I Loki gir `sesEvent=Complaint` meldings-ID-ene. Kontakt teamet som eier
-konsumenten: mottakerne vil trolig ikke ha disse meldingene, eller innholdet ser ut som spam.
-
-## Rapporter forkastet
-
-**Betyr:** en leveringsrapport er hentet 5 ganger uten å bli lagret, og er slettet (poison). Status
-for meldingen er ikke oppdatert, og en ev. bounce eller klage er ikke blokkert.
-
-**Finn årsaken:** søk i Loki etter `Kunne ikke lagre leveringsrapporten`. Linjen har meldings-ID og
-unntakstypen. Det skyldes nesten alltid at databasen har vært utilgjengelig i over 20 minutter
-(5 × `visibility-timeout`); sjekk `db` i readiness og databasen i `fint-common`. Hendelsen kan ikke
-hentes tilbake. Gjaldt den en bounce, står adressen på suppression-listen i SES, og neste melding gir
-en `Bounce/Suppressed`-rapport som blokkerer den.
-
-`reason="invalid"` og `reason="unsupported-type"` varsles ikke, men betyr at configuration set-et
-publiserer andre hendelser enn `Delivery`, `Bounce`, `Complaint` og `Reject`, eller at noe annet enn
-SNS skriver til køen (se [Slå på leveringsrapporter](../README.md#slå-på-leveringsrapporter)).
-`reason="unknown-message"` er forventet i små mengder: rapporter for meldinger som er slettet etter
-60 dager.
-
-## Rapportkøen vokser
-
-**Betyr:** over 1000 rapporter har ventet i køen i 15 minutter. Status og blokkering blir oppdatert
-sent.
-
-**Finn årsaken:** sjekk først [Mottak av rapporter feiler](#mottak-av-rapporter-feiler). Feiler ikke
-hentingen, sjekk at podden kjører og at `communication.email.delivery-reports.enabled` er `true`.
-SQS holder meldingene i 4 dager som standard (opptil 14 dager med `MessageRetentionPeriod`), og
-ingenting går tapt så lenge køen tømmes innen det.
-
 ## Mottak av rapporter feiler
 
 **Betyr:** tjenesten har ikke fått kontakt med rapportkøen på 15 minutter. Utsending og mottak av
@@ -285,6 +186,30 @@ unntakstypen.
   IAM-policyen, og restart podden.
 - `QueueDoesNotExistException`: URL-en i `communication.email.delivery-reports.queue-url` er feil.
 - Nettverksfeil eller timeout: sjekk AWS Health Dashboard og nettverket ut av clusteret.
+
+## Uten varsel
+
+Disse står på dashboardet og i loggen, men varsles ikke:
+
+- **Høy utnyttelse** (`communication_limit_*_usage_ratio`): «Grense nådd» varsler når det faktisk avvises.
+- **Mottaker-429** (`limit="mottaker"`): forventet i små mengder. Mange fra én tenant betyr at
+  konsumenten sender ett varsel per hendelse i stedet for en oppsummering, eller ignorerer `429`.
+  Kontakt teamet som eier konsumenten; mottakergrensen økes ikke.
+- **Blokkerte innsendinger** (`communication_blocklist_rejected_total`): konsumenten håndterer ikke `422`.
+  Er en mottaker blokkert ved en feil, fjernes blokkeringen med
+  [driftsrutinen for blokkeringslisten](../README.md#driftsrutine-for-blokkeringslisten).
+- **Klager** (`status="COMPLAINED"`): mottakerne blokkeres som opt-out. Klageraten mot SES' terskler
+  (0,1 % vurdering, 0,5 % pause) følges i «Reputation metrics» i SES (FFS-2341). Gmail gir ingen klagedata.
+- **Forkastede rapporter** (`communication_delivery_report_discarded_total`): `reason="poison"` betyr at
+  en rapport ble hentet 5 ganger uten å bli lagret, nesten alltid fordi databasen var nede i over
+  20 minutter. Status er da ikke oppdatert. Gjaldt den en bounce, står adressen på suppression-listen
+  i SES, og neste melding gir en `Bounce/Suppressed`-rapport som blokkerer den. `invalid` og
+  `unsupported-type` betyr at configuration set-et publiserer andre hendelser, eller at noe annet enn
+  SNS skriver til køen (se [Slå på leveringsrapporter](../README.md#slå-på-leveringsrapporter)).
+  `unknown-message` er rapporter for meldinger som er slettet etter 60 dager.
+- **Rapportkøen** (`communication_delivery_report_queue_size`): vokser den uten at hentingen feiler,
+  sjekk at podden kjører og at `communication.email.delivery-reports.enabled` er `true`. SQS holder
+  meldingene i 4 dager som standard.
 
 ## Slå opp en melding
 
@@ -354,8 +279,7 @@ En konstruert overskridelse i beta, for å bekrefte at varslene i Grafana Alerts
 2. Send tre meldinger med `tenant: "NOVARI"` til en testadresse. Den tredje gir `429` med
    `limit: "tenant"`.
 3. Bekreft at `communication_limit_rejected_total{limit="tenant", tenant="NOVARI"}` øker, at
-   utnyttelsen for `NOVARI` er over 0.8, og at varslene «Tenantgrense nådd» og «Høy utnyttelse, tenant»
-   går.
+   varselet «Grense nådd» går.
 4. Fjern overriden og deploy igjen.
 
 ## Verifisere utsending

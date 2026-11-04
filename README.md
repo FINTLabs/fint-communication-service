@@ -187,7 +187,7 @@ communication:
 Ingen tenant har override i dag. NOVARI (test) bruker også `default`.
 
 Avvisningene telles per grensetype og tenant, og utnyttelsen av tenant- og totalgrensen publiseres som
-metrikker. Varsel går når en grense er over 80 % utnyttet eller avviser meldinger; se
+metrikker. Varsel går når tenant- eller totalgrensen avviser meldinger; se
 [Drift og varsling](#drift-og-varsling).
 
 ```json
@@ -605,16 +605,10 @@ eksporteres som JSON og legges inn i repoet med PR.
 
 **Varsling.** Varselreglene og hva vakthavende gjør, står i [runbooken](docs/runbook.md):
 
-- utnyttelse av en tenant- eller totalgrense over 80 %,
-- alle avvisninger på tenant- og totalgrensen,
-- over 10 avvisninger på mottakergrensen per tenant per time,
-- over 10 blokkerte innsendinger per tenant per time,
+- avvisninger på tenant- eller totalgrensen,
 - meldinger som ikke ble sendt,
 - en melding som har ligget i køen i over 15 minutter,
 - bounce-rate over 5 % siste time (minst 20 rapporter),
-- klager på over 0,1 % av leverte meldinger siste døgn,
-- leveringsrapporter forkastet som poison,
-- over 1000 rapporter i rapportkøen i 15 minutter,
 - feil mot rapportkøen i 15 minutter.
 
 Reglene registreres manuelt i Grafana Alerts med uttrykkene, tersklene og varighetene i runbooken.
