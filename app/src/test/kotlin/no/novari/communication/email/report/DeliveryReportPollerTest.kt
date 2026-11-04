@@ -22,7 +22,6 @@ class DeliveryReportPollerTest {
     private val queue = InMemoryQueue()
     private val store = FakeMessageStore()
     private val meterRegistry = SimpleMeterRegistry()
-    private val properties = DeliveryReportProperties(enabled = true, maxReceiveCount = 2)
     private val poller =
         DeliveryReportPoller(
             queue = queue,
@@ -34,20 +33,7 @@ class DeliveryReportPollerTest {
                     clock = Clock.systemUTC(),
                 ),
             metrics = DeliveryReportMetrics(meterRegistry),
-            properties = properties,
         )
-
-    @Test
-    fun `a report is deleted from the queue after it is stored`() {
-        val message = store.add()
-        queue.add(DeliveryReportEvents.sesEvent(message.id, "Delivery"))
-
-        poller.poll()
-
-        assertThat(store.applied).containsExactly(message.id to MessageStatus.DELIVERED)
-        assertThat(queue.messages).isEmpty()
-        assertThat(received("DELIVERED")).isEqualTo(1.0)
-    }
 
     @Test
     fun `a report that cannot be stored stays in the queue`() {
@@ -64,37 +50,17 @@ class DeliveryReportPollerTest {
     @Test
     fun `a report that has been received too many times is discarded as poison`() {
         val message = store.add()
-        queue.add(DeliveryReportEvents.sesEvent(message.id, "Delivery"), receiveCount = 3)
+        queue.add(
+            DeliveryReportEvents.sesEvent(message.id, "Delivery"),
+            receiveCount =
+                DeliveryReportPoller.MAX_RECEIVE_COUNT + 1L,
+        )
 
         poller.poll()
 
         assertThat(queue.messages).isEmpty()
         assertThat(store.applied).isEmpty()
         assertThat(discarded(DiscardReason.POISON)).isEqualTo(1.0)
-    }
-
-    @Test
-    fun `invalid and unsupported events are discarded`() {
-        queue.add("{ikke json")
-        queue.add(
-            DeliveryReportEvents.sesEvent(MessageId.generate(), "Open"),
-        )
-
-        poller.poll()
-
-        assertThat(queue.messages).isEmpty()
-        assertThat(discarded(DiscardReason.INVALID)).isEqualTo(1.0)
-        assertThat(discarded(DiscardReason.UNSUPPORTED_TYPE)).isEqualTo(1.0)
-    }
-
-    @Test
-    fun `a report for an unknown message is discarded`() {
-        queue.add(DeliveryReportEvents.sesEvent(MessageId.generate(), "Delivery"))
-
-        poller.poll()
-
-        assertThat(queue.messages).isEmpty()
-        assertThat(discarded(DiscardReason.UNKNOWN_MESSAGE)).isEqualTo(1.0)
     }
 
     @Test
@@ -156,8 +122,6 @@ class DeliveryReportPollerTest {
             deleteFailure?.let { throw it }
             messages.remove(report)
         }
-
-        override fun approximateSize(): Long = messages.size.toLong()
     }
 
     private class FakeMessageStore : MessageStore {

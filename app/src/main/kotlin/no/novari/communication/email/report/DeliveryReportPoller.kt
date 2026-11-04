@@ -2,13 +2,13 @@ package no.novari.communication.email.report
 
 import io.github.oshai.kotlinlogging.KotlinLogging
 import org.springframework.scheduling.annotation.Scheduled
+import java.time.Duration
 
 class DeliveryReportPoller(
     private val queue: DeliveryReportQueue,
     private val parser: DeliveryReportParser,
     private val processor: DeliveryReportProcessor,
     private val metrics: DeliveryReportMetrics,
-    private val properties: DeliveryReportProperties,
 ) {
     private val log = KotlinLogging.logger {}
 
@@ -20,7 +20,7 @@ class DeliveryReportPoller(
     fun poll() {
         val reports =
             try {
-                queue.receive(properties.batchSize, properties.visibilityTimeout)
+                queue.receive(BATCH_SIZE, VISIBILITY_TIMEOUT)
             } catch (exception: RuntimeException) {
                 metrics.pollFailed()
                 log.warn { "Kunne ikke hente leveringsrapporter fra køen: ${exception.javaClass.simpleName}" }
@@ -30,7 +30,7 @@ class DeliveryReportPoller(
     }
 
     private fun handle(queued: QueuedReport) {
-        if (queued.receiveCount > properties.maxReceiveCount) return discard(queued, DiscardReason.POISON)
+        if (queued.receiveCount > MAX_RECEIVE_COUNT) return discard(queued, DiscardReason.POISON)
         when (val parsed = parser.parse(queued.body)) {
             ParsedReport.Invalid -> discard(queued, DiscardReason.INVALID)
             ParsedReport.Unsupported -> discard(queued, DiscardReason.UNSUPPORTED_TYPE)
@@ -96,4 +96,11 @@ class DeliveryReportPoller(
 
     private fun describe(queued: QueuedReport): String =
         "kømelding=${queued.queueMessageId} forsøk=${queued.receiveCount}"
+
+    companion object {
+        // SQS returns at most 10 messages per receive.
+        private const val BATCH_SIZE = 10
+        private val VISIBILITY_TIMEOUT: Duration = Duration.ofMinutes(5)
+        const val MAX_RECEIVE_COUNT = 5
+    }
 }

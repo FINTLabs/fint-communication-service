@@ -35,12 +35,6 @@ class DeliveryReportConfiguration {
         DeliveryReportMetrics(meterRegistry)
 
     @Bean
-    fun deliveryReportQueueMetrics(
-        queue: DeliveryReportQueue,
-        meterRegistry: MeterRegistry,
-    ): DeliveryReportQueueMetrics = DeliveryReportQueueMetrics(queue, meterRegistry)
-
-    @Bean
     fun deliveryReportProcessor(
         messageStore: MessageStore,
         transactions: TransactionOperations,
@@ -53,8 +47,7 @@ class DeliveryReportConfiguration {
         parser: DeliveryReportParser,
         processor: DeliveryReportProcessor,
         metrics: DeliveryReportMetrics,
-        properties: DeliveryReportProperties,
-    ): DeliveryReportPoller = DeliveryReportPoller(queue, parser, processor, metrics, properties)
+    ): DeliveryReportPoller = DeliveryReportPoller(queue, parser, processor, metrics)
 
     private companion object {
         const val QUEUE_URL_PROPERTY = "communication.email.delivery-reports.queue-url"

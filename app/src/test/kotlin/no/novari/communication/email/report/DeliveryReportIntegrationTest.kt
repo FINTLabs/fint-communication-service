@@ -31,9 +31,6 @@ class DeliveryReportIntegrationTest {
     lateinit var poller: DeliveryReportPoller
 
     @Autowired
-    lateinit var queueMetrics: DeliveryReportQueueMetrics
-
-    @Autowired
     lateinit var messageService: MessageService
 
     @Autowired
@@ -204,29 +201,6 @@ class DeliveryReportIntegrationTest {
     }
 
     @Test
-    fun `an event that keeps coming back is discarded as poison`() {
-        val address = nextRecipient()
-        val id = sendAndDispatch(address)
-        enqueue(event(id, "Delivery", address))
-        val before = discarded(DiscardReason.POISON)
-        repeat(2) {
-            assertThat(
-                sqs
-                    .receiveMessage {
-                        it.queueUrl(queueUrl.value).visibilityTimeout(VISIBILITY.toSeconds().toInt())
-                    }.messages(),
-            ).hasSize(1)
-            Thread.sleep(VISIBILITY.plusMillis(200).toMillis())
-        }
-
-        pollUntilEmpty()
-
-        assertThat(stored(id).status).isEqualTo(MessageStatus.SENT)
-        assertThat(discarded(DiscardReason.POISON) - before).isEqualTo(1.0)
-        assertThat(queueSize()).isZero()
-    }
-
-    @Test
     fun `invalid and unsupported events are discarded`() {
         val before = discarded(DiscardReason.INVALID) to discarded(DiscardReason.UNSUPPORTED_TYPE)
         enqueue("{ikke json")
@@ -237,15 +211,6 @@ class DeliveryReportIntegrationTest {
         assertThat(discarded(DiscardReason.INVALID) - before.first).isEqualTo(1.0)
         assertThat(discarded(DiscardReason.UNSUPPORTED_TYPE) - before.second).isEqualTo(1.0)
         assertThat(queueSize()).isZero()
-    }
-
-    @Test
-    fun `the queue size is published`() {
-        repeat(3) { enqueue(event(MessageId.generate(), "Delivery", nextRecipient())) }
-
-        queueMetrics.refresh()
-
-        assertThat(meterRegistry.get(DeliveryReportQueueMetrics.SIZE_METRIC).gauge().value()).isEqualTo(3.0)
     }
 
     private fun event(
@@ -320,7 +285,6 @@ class DeliveryReportIntegrationTest {
     private companion object {
         val START: Instant = Instant.parse("2026-10-12T08:00:00Z")
         val OCCURRED_AT: Instant = Instant.parse("2026-10-12T08:00:30.123456Z")
-        val VISIBILITY: Duration = Duration.ofSeconds(1)
         const val MAX_POLLS = 5
     }
 }

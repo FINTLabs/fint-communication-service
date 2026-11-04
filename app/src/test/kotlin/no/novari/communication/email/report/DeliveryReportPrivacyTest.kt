@@ -30,9 +30,6 @@ class DeliveryReportPrivacyTest {
     lateinit var poller: DeliveryReportPoller
 
     @Autowired
-    lateinit var queueMetrics: DeliveryReportQueueMetrics
-
-    @Autowired
     lateinit var messageService: MessageService
 
     @Autowired
@@ -86,7 +83,6 @@ class DeliveryReportPrivacyTest {
             poller.poll()
             if (queueSize() == "0") return@repeat
         }
-        queueMetrics.refresh()
     }
 
     @Test
@@ -145,7 +141,6 @@ class DeliveryReportPrivacyTest {
                     """template="team/varsel",tenant="ROGALAND"}""",
             ).containsPattern("""communication_delivery_report_discarded_total\{reason="invalid"}""")
             .containsPattern("""communication_delivery_report_discarded_total\{reason="unknown-message"}""")
-            .contains("communication_delivery_report_queue_size ")
             .doesNotContainIgnoringCase(ADDRESS.trim())
             .doesNotContain(hasher.hash(ADDRESS).value)
     }

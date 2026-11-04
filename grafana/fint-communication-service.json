@@ -710,8 +710,8 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "Rapportkø",
-      "description": "Rapporter som venter i køen fra SES, og feil mot køen per 5 minutter. Varsel over 1000 i køen eller ved feil i 15 minutter.",
+      "title": "Feil mot rapportkøen",
+      "description": "Feil mot køen fra SES per 5 minutter. Varsel ved feil i 15 minutter.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -733,20 +733,7 @@
             "showPoints": "never"
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Feil"
-            },
-            "properties": [
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "legend": {
@@ -765,15 +752,6 @@
       "targets": [
         {
           "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "max(communication_delivery_report_queue_size{app=\"fint-communication-service\"})",
-          "legendFormat": "I køen"
-        },
-        {
-          "refId": "B",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"

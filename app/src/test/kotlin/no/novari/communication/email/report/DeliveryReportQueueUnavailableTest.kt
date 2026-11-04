@@ -20,16 +20,12 @@ import org.springframework.web.context.WebApplicationContext
     properties = [
         "communication.email.delivery-reports.enabled=true",
         "communication.email.delivery-reports.poll-interval=1h",
-        "communication.email.delivery-reports.queue-metrics-refresh=1h",
         "communication.email.delivery-reports.queue-url=$UNREACHABLE_QUEUE_URL",
     ],
 )
 class DeliveryReportQueueUnavailableTest {
     @Autowired
     lateinit var poller: DeliveryReportPoller
-
-    @Autowired
-    lateinit var queueMetrics: DeliveryReportQueueMetrics
 
     @Autowired
     lateinit var meterRegistry: MeterRegistry
@@ -42,7 +38,6 @@ class DeliveryReportQueueUnavailableTest {
         val before = pollFailures()
 
         poller.poll()
-        queueMetrics.refresh()
 
         assertThat(pollFailures() - before).isGreaterThanOrEqualTo(1.0)
         MockMvcBuilders

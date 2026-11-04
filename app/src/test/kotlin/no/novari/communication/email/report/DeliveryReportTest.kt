@@ -13,8 +13,6 @@ import org.springframework.test.context.TestPropertySource
         "communication.email.delivery-reports.enabled=true",
         "communication.email.delivery-reports.queue-url=http://localhost/000000000000/brukes-ikke",
         "communication.email.delivery-reports.poll-interval=1h",
-        "communication.email.delivery-reports.queue-metrics-refresh=1h",
-        "communication.email.delivery-reports.max-receive-count=2",
     ],
 )
 annotation class DeliveryReportTest

@@ -9,6 +9,4 @@ interface DeliveryReportQueue {
     ): List<QueuedReport>
 
     fun delete(report: QueuedReport)
-
-    fun approximateSize(): Long
 }

@@ -249,7 +249,6 @@ Alle bokser som ikke er turkise, er komponenter i API-applikasjonen. `GlobalExce
 en feil. `DispatchQueueMetrics` (størrelse og alder på køen) er ikke tegnet; den leser `dispatch_queue`
 hvert minutt, som `LimitUsageMetrics` gjør med `send_usage`. Heller ikke `MessageCleaner` er tegnet;
 den sletter gamle rader i `message` i den nattlige opprydningen, som de andre opprydderne.
-`DeliveryReportQueueMetrics` leser lengden på rapportkøen hvert minutt og er ikke tegnet.
 Rapportkomponentene finnes bare når mottaket er slått på (se [Leveringsrapporter](#leveringsrapporter)).
 
 ### Pakkestruktur
@@ -263,7 +262,7 @@ no.novari.communication
 │   └── report/          DeliveryReportPoller, DeliveryReportParser, DeliveryReportProcessor,
 │                        DeliveryReportQueue, SqsDeliveryReportQueue, QueuedReport,
 │                        DeliveryReport, ParsedReport, ProcessedReport, SesDeliveryEvent,
-│                        DiscardReason, DeliveryReportMetrics, DeliveryReportQueueMetrics,
+│                        DiscardReason, DeliveryReportMetrics,
 │                        DeliveryReportProperties, DeliveryReportConfiguration
 ├── api/                 MessageController
 │   ├── exceptions/      GlobalExceptionHandler, RequestValidationException
@@ -457,7 +456,6 @@ classDiagram
         <<interface>>
         +receive(maxMessages, visibilityTimeout) List~QueuedReport~
         +delete(report)
-        +approximateSize() Long
     }
     class QueuedReport {
         +String queueMessageId
@@ -877,10 +875,9 @@ sequenceDiagram
 - **Idempotens.** SNS og SQS leverer minst én gang. Et duplikat gir samme resultat, siden status er endelig. Det trengs derfor ingen tabell over behandlede
   hendelser.
 - **Sletting.** En hendelse slettes fra køen først når transaksjonen er committet. Feiler lagringen
-  (f.eks. databasen er nede), blir den liggende og blir synlig igjen etter 5 minutter
-  (`visibility-timeout`). Feiler slettingen, behandles hendelsen på nytt, med samme resultat.
+  (f.eks. databasen er nede), blir den liggende og blir synlig igjen etter 5 minutter. Feiler slettingen, behandles hendelsen på nytt, med samme resultat.
 - **Forkastes.** Hendelser som ikke kan leses, andre hendelsestyper og hendelser som er hentet mer enn
-  5 ganger (`max-receive-count`, poison), logges med kø-ID og antall forsøk og slettes. Rapporter for
+  5 ganger (poison), logges med kø-ID og antall forsøk og slettes. Rapporter for
   ukjente meldinger (aldri sendt herfra, eller slettet etter 60 dager) logges og slettes. Køen har ingen dead-letter-kø, siden hendelsene har adressen i
   klartekst; alt telles i `communication.delivery_report.discarded` (`reason`).
 - **Køen utilgjengelig.** Feil mot køen logges som WARN (bare unntakstypen) og telles i
@@ -892,9 +889,8 @@ sequenceDiagram
 - **Metrikker.** `communication.delivery_report.received` (`tenant`, `channel`, `template`, `status`)
   telles for rapporter på kjente meldinger, også duplikater. `status` er `MessageStatus` fra
   rapporten (eller `COMPLAINED` for en klage), ikke statusen meldingen endte med. Bounce- og
-  klagerate regnes ut i Grafana. `DeliveryReportQueueMetrics` publiserer
-  `communication.delivery_report.queue.size` hvert minutt. Varslene står i
-  [runbooken](runbook.md#varselregler).
+  klagerate regnes ut i Grafana. Lengden på køen finnes i CloudWatch
+  (`ApproximateNumberOfMessagesVisible`). Varslene står i [runbooken](runbook.md#varselregler).
 - **Slått av som default.** `communication.email.delivery-reports.enabled` er `false`. Da finnes
   verken poller, kø-klient eller metrikker. Slått på uten `queue-url` stopper oppstarten. Se README
   for hvordan mottaket slås på.

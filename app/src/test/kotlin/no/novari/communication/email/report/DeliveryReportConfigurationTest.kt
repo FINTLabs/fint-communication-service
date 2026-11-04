@@ -55,19 +55,6 @@ class DeliveryReportConfigurationTest {
         }
     }
 
-    @Test
-    fun `fails to start with a batch size above what SQS allows`() {
-        contextRunner
-            .withPropertyValues(
-                "communication.email.delivery-reports.enabled=true",
-                "communication.email.delivery-reports.queue-url=$QUEUE_URL",
-                "communication.email.delivery-reports.batch-size=11",
-            ).run { context ->
-                assertThat(context).hasFailed()
-                assertThat(rootCauseMessage(context.startupFailure)).contains("batch-size")
-            }
-    }
-
     private fun rootCauseMessage(failure: Throwable?): String =
         generateSequence(failure) { it.cause }.last().message.orEmpty()
 

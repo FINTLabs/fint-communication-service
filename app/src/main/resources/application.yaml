@@ -46,7 +46,6 @@ communication:
     provider: logging
     delivery-reports:
       poll-interval: 10s
-      queue-metrics-refresh: 60s
   dispatch:
     poll-interval: 2s
     batch-size: 10

@@ -40,7 +40,6 @@ beskrevet i [README](../README.md#grenser) og
 | `communication_delivery_report_received_total`    | Counter | `tenant`, `channel`, `template`, `status` (`DELIVERED`, `BOUNCED`, `SUPPRESSED`, `FAILED`, `COMPLAINED`)   | Leveringsrapporter for kjente meldinger, per status i rapporten. |
 | `communication_delivery_report_discarded_total`   | Counter | `reason` (`invalid`, `unsupported-type`, `unknown-message`, `poison`)                                      | Rapporter som ble forkastet.                                     |
 | `communication_delivery_report_poll_failed_total` | Counter | –                                                                                                          | Feil mot rapportkøen (henting eller sletting).                   |
-| `communication_delivery_report_queue_size`        | Gauge   | –                                                                                                          | Rapporter som venter i køen (omtrentlig, fra SQS).               |
 
 Utnyttelsen regnes ut fra `send_usage` hvert minutt (`communication.limits.usage-refresh`), og kø-metrikkene
 fra `dispatch_queue` hvert minutt (`communication.dispatch.queue-metrics-refresh`), så de kan ligge opptil ett
@@ -202,9 +201,6 @@ Disse står på dashboardet og i loggen, men varsles ikke:
   `unsupported-type` betyr at configuration set-et publiserer andre hendelser, eller at noe annet enn
   SNS skriver til køen (se [Slå på leveringsrapporter](../README.md#slå-på-leveringsrapporter)).
   `unknown-message` er rapporter for meldinger som er slettet etter 60 dager.
-- **Rapportkøen** (`communication_delivery_report_queue_size`): vokser den uten at hentingen feiler,
-  sjekk at podden kjører og at `communication.email.delivery-reports.enabled` er `true`. SQS holder
-  meldingene i 4 dager som standard.
 
 ## Slå opp en melding
 

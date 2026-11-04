@@ -4,7 +4,6 @@ import software.amazon.awssdk.regions.Region
 import software.amazon.awssdk.services.sqs.SqsClient
 import software.amazon.awssdk.services.sqs.SqsClientBuilder
 import software.amazon.awssdk.services.sqs.model.MessageSystemAttributeName
-import software.amazon.awssdk.services.sqs.model.QueueAttributeName
 import java.time.Duration
 
 class SqsDeliveryReportQueue(
@@ -38,13 +37,6 @@ class SqsDeliveryReportQueue(
     override fun delete(report: QueuedReport) {
         client.deleteMessage { it.queueUrl(queueUrl).receiptHandle(report.receiptHandle) }
     }
-
-    override fun approximateSize(): Long =
-        client
-            .getQueueAttributes {
-                it.queueUrl(queueUrl).attributeNames(QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES)
-            }.attributes()[QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES]
-            ?.toLongOrNull() ?: 0
 
     companion object {
         private val API_CALL_TIMEOUT: Duration = Duration.ofSeconds(30)
