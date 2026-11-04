@@ -18,11 +18,10 @@ Se [docs/architecture.md](docs/architecture.md) for arkitektur, dataflyt og sekv
 meldings-ID. Meldingen legges i en kø i databasen og sendes asynkront via leverandøren som er
 konfigurert (se [Utsending](#utsending)). Status for meldingen slås opp med
 `GET /api/v1/messages/{id}` (se [Status for en melding](#status-for-en-melding)). Hver mottaker kan få høyst 10 meldinger per time og 40
-per døgn (se [Grenser](#grenser)), og mottakere som har meldt seg av eller hard-bouncet, avvises
-(se [Blokkeringsliste](#blokkeringsliste)). Amazon SES er klar i koden, men kontoen og domenet
+per døgn (se [Grenser](#grenser)). Amazon SES er klar i koden, men kontoen og domenet
 finnes ikke ennå, så alle miljøer bruker foreløpig leverandøren `logging`, som logger og forkaster
-meldingen. Leveringsrapportene fra SES (levert, bounce, klage) gir sluttstatus og blokkerer adresser
-som bouncer eller klager, men mottaket er slått av til køen finnes (se
+meldingen. Leveringsrapportene fra SES (levert, bounce, klage) gir sluttstatus, men mottaket er slått
+av til køen finnes (se
 [Leveringsrapporter](#leveringsrapporter)). Layout og autentisering kommer i egne oppgaver under
 [FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
 
@@ -104,14 +103,14 @@ gjentar aldri verdiene som ble sendt inn.
 }
 ```
 
-| `status`     | Betyr                                                                                                                                     |
-|--------------|-------------------------------------------------------------------------------------------------------------------------------------------|
-| `RECEIVED`   | Akseptert og lagt i køen, men ikke sendt ennå. Gjelder også mens tjenesten venter på et nytt forsøk etter en forbigående feil.            |
-| `SENT`       | SES har tatt imot meldingen for levering. Det betyr ikke at den er levert til mottakeren.                                                 |
-| `DELIVERED`  | Mottakerens e-postserver har tatt imot meldingen (leveringsrapport).                                                                      |
-| `BOUNCED`    | Adressen eller domenet finnes ikke (hard bounce). Mottakeren blokkeres i 30 dager.                                                        |
-| `SUPPRESSED` | SES sendte ikke, fordi adressen står på SES sin suppression-liste etter en tidligere bounce eller klage. Mottakeren blokkeres i 30 dager. |
-| `FAILED`     | Meldingen ble ikke sendt eller ikke levert, og tjenesten prøver ikke igjen. `failureReason` sier hvorfor.                                 |
+| `status`     | Betyr                                                                                                                          |
+|--------------|--------------------------------------------------------------------------------------------------------------------------------|
+| `RECEIVED`   | Akseptert og lagt i køen, men ikke sendt ennå. Gjelder også mens tjenesten venter på et nytt forsøk etter en forbigående feil. |
+| `SENT`       | SES har tatt imot meldingen for levering. Det betyr ikke at den er levert til mottakeren.                                      |
+| `DELIVERED`  | Mottakerens e-postserver har tatt imot meldingen (leveringsrapport).                                                           |
+| `BOUNCED`    | Adressen eller domenet finnes ikke (hard bounce). SES sender ikke til adressen igjen.                                          |
+| `SUPPRESSED` | SES sendte ikke, fordi adressen står på SES sin suppression-liste etter en tidligere bounce eller klage.                       |
+| `FAILED`     | Meldingen ble ikke sendt eller ikke levert, og tjenesten prøver ikke igjen. `failureReason` sier hvorfor.                      |
 
 | `failureReason`     | Betyr                                                                             | Nytt forsøk                |
 |---------------------|-----------------------------------------------------------------------------------|----------------------------|
@@ -203,95 +202,7 @@ Retry-After: 3000
 }
 ```
 
-## Blokkeringsliste
 
-Mottakere som har meldt seg av (`OPT_OUT`) eller hard-bouncet (`HARD_BOUNCE`), får ikke e-post fra
-tjenesten. Listen er felles for alle tenants og sjekkes ved innsending, før grensene.
-
-| Årsak         | Varighet                   | Legges inn av                                                                                                  |
-|---------------|----------------------------|----------------------------------------------------------------------------------------------------------------|
-| `OPT_OUT`     | Til den fjernes manuelt.   | [Driftsrutinen](#driftsrutine-for-blokkeringslisten), og automatisk når mottakeren klager (markerer som spam). |
-| `HARD_BOUNCE` | 30 dager fra siste bounce. | Driftsrutinen, og automatisk fra [leveringsrapportene](#leveringsrapporter) (permanent bounce).                |
-
-- Mottakeren kjennes igjen på samme måte som for grensene: adressen etter `trim` og små bokstaver.
-- En blokkert mottaker gir `422 Unprocessable Content`. Svaret sier ikke om årsaken er opt-out eller
-  bounce, og gjentar ikke adressen. Meldingen lagres ikke og teller ikke mot grensene.
-- Listen lagrer bare HMAC-hashen av adressen, aldri adressen.
-- En utløpt blokkering gjelder ikke lenger og slettes av den nattlige opprydningen.
-- Er databasen utilgjengelig, avvises meldingen med `503` (fail-closed).
-- Avvisningene telles per tenant (`communication_blocklist_rejected_total`). Mange avvisninger fra
-  samme tenant tyder på en konsument som ikke håndterer `422`; se [Drift og varsling](#drift-og-varsling).
-
-```json
-HTTP/1.1 422
-
-{
-  "title": "Unprocessable Content",
-  "status": 422,
-  "detail": "Mottakeren kan ikke motta e-post fra tjenesten.",
-  "instance": "/api/v1/messages"
-}
-```
-
-### Driftsrutine for blokkeringslisten
-
-Det finnes ingen avmeldingslenke eller admin-API ennå
-([FFS-2340](https://novari-iks.atlassian.net/browse/FFS-2340)). Opt-out legges inn og blokkeringer
-fjernes med SQL mot databasen `fint-common`, etter at hashen av adressen er beregnet.
-
-**1. Beregn hashen i podden.** Nøkkelen ligger allerede i podden, så den forlater aldri clusteret, og
-du trenger ikke tilgang til 1Password-itemet. Imaget har ikke shell, men `kubectl exec` starter `java`
-direkte. Legg adressene i en fil, én per linje, og send filen inn på stdin, så adressene ikke havner i
-shell-historikken eller prosesslisten:
-
-```bash
-kubectl exec -i -n fintlabs-no deploy/fint-communication-service -- java -Xmx64m -cp /app/app.jar -Dloader.main=no.novari.communication.recipient.RecipientHashCliKt org.springframework.boot.loader.launch.PropertiesLauncher < adresser.txt
-```
-
-Utdata er én hash (64 hex-tegn) per adresse, i samme rekkefølge. Blanke linjer hoppes over.
-Verktøyet bruker samme `RecipientHasher` som tjenesten og skriver verken adressen eller nøkkelen.
-`-Xmx64m` hindrer at den ekstra JVM-en tar minne fra tjenesten, som har samme minnegrense (512 Mi).
-Slett filen etterpå.
-
-**2. Kjør SQL** med hashen i stedet for `<hash>`.
-
-Legg til opt-out (gjør ingenting hvis den finnes fra før):
-
-```sql
-INSERT INTO recipient_blocklist (recipient_hash, reason, source, expires_at)
-VALUES ('<hash>', 'OPT_OUT', 'MANUAL', NULL)
-ON CONFLICT (recipient_hash, reason) DO NOTHING;
-```
-
-Legg inn hard bounce manuelt (30 dager; forlenger en eksisterende blokkering, men forkorter den aldri):
-
-```sql
-INSERT INTO recipient_blocklist (recipient_hash, reason, source, expires_at)
-VALUES ('<hash>', 'HARD_BOUNCE', 'MANUAL', now() + interval '30 days')
-ON CONFLICT (recipient_hash, reason)
-DO UPDATE SET expires_at = GREATEST(recipient_blocklist.expires_at, EXCLUDED.expires_at);
-```
-
-Se status:
-
-```sql
-SELECT reason, source, created_at, expires_at FROM recipient_blocklist WHERE recipient_hash = '<hash>';
-```
-
-Fjern opt-out (en aktiv hard bounce står igjen):
-
-```sql
-DELETE FROM recipient_blocklist WHERE recipient_hash = '<hash>' AND reason = 'OPT_OUT';
-```
-
-Fjern all blokkering av mottakeren:
-
-```sql
-DELETE FROM recipient_blocklist WHERE recipient_hash = '<hash>';
-```
-
-Tabellen avviser ugyldige kombinasjoner: `OPT_OUT` kan ikke ha utløp, og `HARD_BOUNCE` må ha det.
-SQL-en over er dekket av `BlocklistIntegrationTest`.
 
 ## Maler
 
@@ -379,30 +290,57 @@ til SQS-køen `email-delivery-reports`. Tjenesten henter dem hvert 10. sekund, b
 og som rå hendelser (raw message delivery). Mottaket er slått av som default og i beta, siden køen
 ikke finnes ennå; se [Slå på leveringsrapporter](#slå-på-leveringsrapporter).
 
-| Hendelse fra SES                          | Status                       | Blokkering               |
-|-------------------------------------------|------------------------------|--------------------------|
-| `Delivery`                                | `DELIVERED`                  | –                        |
-| `Bounce`, permanent                       | `BOUNCED`                    | `HARD_BOUNCE` i 30 dager |
-| `Bounce`, permanent, på suppression-liste | `SUPPRESSED`                 | `HARD_BOUNCE` i 30 dager |
-| `Bounce`, forbigående eller ukjent        | `FAILED` (`DELIVERY_FAILED`) | –                        |
-| `Reject`                                  | `FAILED` (`REJECTED`)        | –                        |
-| `Complaint`                               | Uendret                      | `OPT_OUT`                |
+| Hendelse fra SES                          | Status                       |
+|-------------------------------------------|------------------------------|
+| `Delivery`                                | `DELIVERED`                  |
+| `Bounce`, permanent                       | `BOUNCED`                    |
+| `Bounce`, permanent, på suppression-liste | `SUPPRESSED`                 |
+| `Bounce`, forbigående eller ukjent        | `FAILED` (`DELIVERY_FAILED`) |
+| `Reject`                                  | `FAILED` (`REJECTED`)        |
+| `Complaint`                               | Uendret                      |
+| `Complaint`, på suppression-liste         | `SUPPRESSED`                 |
 
 - Hendelsen knyttes til meldingen med taggen `messageId`, som tjenesten setter ved sending.
 - En rapport endrer bare en melding som er `RECEIVED` eller `SENT`; den første rapporten gjelder, og
   samme rapport to ganger gir samme resultat. En klage kommer etter `Delivery` og endrer derfor ikke
-  status, men blokkerer mottakeren.
-- Blokkeringen ved bounce gjelder i 30 dager fra tidspunktet i rapporten. Den forlenger en eksisterende
-  blokkering, men forkorter den aldri, og en opt-out berøres ikke. En klage blir en opt-out som gjelder
-  til den fjernes manuelt. Blokkeringen skrives også når meldingen er ukjent (f.eks. slettet etter 60
-  dager), siden adressen står i rapporten.
-- Adressen i rapporten hashes med en gang og lagres, logges eller telles aldri i klartekst.
+  status.
+- Tjenesten blokkerer ingen adresser selv. SES legger adresser som gir hard bounce eller klage på
+  account-level suppression-listen og sender ikke til dem igjen før de fjernes. Neste melding til en
+  slik adresse får `SUPPRESSED`. Se [Suppression i SES](#suppression-i-ses).
+- Adressen i rapporten leses ikke, og lagres, logges eller telles aldri.
 - En rapport slettes fra køen først når den er lagret. Rapporter som ikke kan leses, andre
   hendelsestyper (f.eks. `Send`, `DeliveryDelay`, `Open`) og rapporter som er hentet 5 ganger, logges
   uten innhold, telles og slettes. Configuration set-et bør derfor bare publisere `Delivery`,
   `Bounce`, `Complaint` og `Reject`.
 - Er køen utilgjengelig, logges og telles det, og tjenesten fortsetter som før. Køen er ikke med i
   helsesjekkene, så tjenesten tar fortsatt imot meldinger.
+
+### Suppression i SES
+
+Tjenesten har ingen egen blokkeringsliste. SES' account-level suppression-liste stopper sending til
+adresser som har gitt hard bounce eller klage, og adressene står der til de fjernes. Kontoen må ha
+`SuppressedReasons` `BOUNCE` og `COMPLAINT`, som er standard for nye kontoer
+(`aws sesv2 get-account`).
+
+- **Avmelding:** ønsker noen å slippe e-post, kontakter drift teamet som sendte, og teamet fjerner
+  mottakeren i sitt eget system
+  ([FFS-2340](https://novari-iks.atlassian.net/browse/FFS-2340)).
+- **Nødbrems:** haster det, og teamet ikke kan stoppe utsendingen raskt nok, legges adressen på
+  suppression-listen. Det krever at kontoen er ute av sandkassen.
+
+  ```bash
+  aws sesv2 put-suppressed-destination --email-address <adresse> --reason COMPLAINT
+  ```
+
+- **Fjerne en adresse** som står på listen ved en feil:
+
+  ```bash
+  aws sesv2 get-suppressed-destination --email-address <adresse>
+  aws sesv2 delete-suppressed-destination --email-address <adresse>
+  ```
+
+  Kommandoene skiller mellom store og små bokstaver; bruk adressen slik den står på listen
+  (`aws sesv2 list-suppressed-destinations`).
 
 ## Lokal utvikling
 
@@ -453,7 +391,6 @@ Loggen er JSON, også lokalt og i testene. Lesbar tekst får man med et tomt for
 | `communication.email.delivery-reports.poll-interval`, `communication.email.delivery-reports.batch-size`               | Hvor ofte køen sjekkes (`10s`) og hvor mange rapporter som hentes om gangen (`10`, høyst 10).                                     |
 | `communication.email.delivery-reports.visibility-timeout`                                                             | Hvor lenge en hentet rapport er usynlig for andre før den kan hentes på nytt (`5m`).                                              |
 | `communication.email.delivery-reports.max-receive-count`                                                              | Antall ganger en rapport kan hentes før den forkastes som poison (`5`).                                                           |
-| `communication.email.delivery-reports.block-for`                                                                      | Hvor lenge en bounce blokkerer mottakeren, regnet fra tidspunktet i rapporten (`30d`).                                            |
 | `communication.email.delivery-reports.queue-metrics-refresh`                                                          | Hvor ofte lengden på rapportkøen leses (`60s`).                                                                                   |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`                                                                          | Nøkler til IAM-brukeren som sender. Fra 1Password. Påkrevd med `ses`.                                                             |
 | `communication.dispatch.poll-interval`, `communication.dispatch.batch-size`                                           | Hvor ofte køen sjekkes (`2s`) og hvor mange meldinger som hentes om gangen (`10`).                                                |
@@ -477,8 +414,7 @@ en override med bare ett av feltene stopper også oppstarten.
 Nye nøkler lages med `openssl rand -base64 32`. Bytter man krypteringsnøkkelen for køen, kan
 meldinger som ligger i køen, ikke lenger dekrypteres, og de feiler etter siste forsøk. Bytt den
 derfor når køen er tom (`communication_dispatch_queue_size` er 0). Bytter man hashing-nøkkelen, kjenner tjenesten ikke lenger igjen
-mottakere som er lagret fra før. Det gjelder også blokkeringslisten: opt-outs må da registreres på nytt,
-og hard bounces bygges opp igjen først når leverandøren rapporterer dem på nytt. Se
+mottakere som er lagret fra før. Se
 [Mottaker-hashing](docs/architecture.md#mottaker-hashing).
 
 Log-nivået endres uten kodeendring ved å legge en env-variabel i overlayet:
@@ -545,9 +481,7 @@ Jackson 3 (Spring Boot 4) støtter `java.time` uten ekstra modul.
 ### Feil fra tjenesten
 
 Klienten kaster Springs vanlige unntak: `RestClientResponseException` (blokkerende) og
-`WebClientResponseException` (reactive), med ProblemDetail i bodyen. `422` betyr at mottakeren er
-blokkert (se [Blokkeringsliste](#blokkeringsliste)); meldingen bør droppes, siden et nytt forsøk gir
-samme svar. `429` betyr at mottakeren har
+`WebClientResponseException` (reactive), med ProblemDetail i bodyen. `429` betyr at mottakeren har
 nådd en grense (se [Grenser](#grenser)). Meldingen er ikke lagret, og den bør enten droppes eller
 sendes på nytt etter `Retry-After`. Ikke prøv på nytt i en løkke.
 
@@ -581,7 +515,6 @@ slått på.
 |---------------------------------------------------|-----------------------------------------------------------------------|--------------------------------------------------------------------|
 | `communication_message_accepted_total`            | `tenant`, `channel`                                                   | Aksepterte meldinger (`202`).                                      |
 | `communication_limit_rejected_total`              | `limit` (`mottaker`, `tenant`, `total`), `tenant`                     | Meldinger avvist av en grense (`429`).                             |
-| `communication_blocklist_rejected_total`          | `tenant`                                                              | Meldinger avvist fordi mottakeren er blokkert (`422`).             |
 | `communication_limit_tenant_usage_ratio`          | `tenant`, `window` (`hour`, `day`)                                    | Forbruk delt på tenantgrensen, siste time og siste døgn.           |
 | `communication_limit_total_usage_ratio`           | `window` (`hour`, `day`)                                              | Forbruk delt på totalgrensen, siste time og siste døgn.            |
 | `communication_message_sent_total`                | `tenant`, `channel`                                                   | Meldinger sendt til leverandøren.                                  |

@@ -2,9 +2,11 @@ package no.novari.communication.email.report
 
 import io.micrometer.core.instrument.MeterRegistry
 import no.novari.communication.message.MessageService
+import no.novari.communication.message.MessageStore
 import no.novari.communication.message.dispatch.DispatchWorker
 import no.novari.communication.message.domain.EmailPayload
 import no.novari.communication.message.domain.MessageId
+import no.novari.communication.model.MessageStatus
 import no.novari.communication.model.Tenant
 import no.novari.communication.recipient.RecipientHasher
 import org.assertj.core.api.Assertions.assertThat
@@ -43,6 +45,9 @@ class DeliveryReportPrivacyTest {
     lateinit var jdbcClient: JdbcClient
 
     @Autowired
+    lateinit var messageStore: MessageStore
+
+    @Autowired
     lateinit var meterRegistry: MeterRegistry
 
     @Autowired
@@ -60,7 +65,6 @@ class DeliveryReportPrivacyTest {
     fun receiveReportsWithTheAddress() {
         sqs.purgeQueue { it.queueUrl(queueUrl.value) }
         jdbcClient.sql("DELETE FROM send_usage").update()
-        jdbcClient.sql("DELETE FROM recipient_blocklist").update()
         jdbcClient.sql("DELETE FROM dispatch_queue").update()
         jdbcClient.sql("DELETE FROM message").update()
 
@@ -86,14 +90,9 @@ class DeliveryReportPrivacyTest {
     }
 
     @Test
-    fun `the reports are stored as status and a hashed blocking`() {
-        assertThat(
-            jdbcClient
-                .sql("SELECT count(*) FROM recipient_blocklist WHERE recipient_hash = :hash AND source = 'SES'")
-                .param("hash", hasher.hash(ADDRESS).value)
-                .query(Long::class.java)
-                .single(),
-        ).isEqualTo(2L)
+    fun `the reports are stored as status`() {
+        assertThat(messages.map { messageStore.find(it)?.status })
+            .containsExactly(MessageStatus.BOUNCED, MessageStatus.FAILED, MessageStatus.DELIVERED)
         assertThat(queueSize()).isEqualTo("0")
     }
 

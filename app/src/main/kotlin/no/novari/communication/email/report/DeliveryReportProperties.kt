@@ -13,7 +13,6 @@ data class DeliveryReportProperties(
     val visibilityTimeout: Duration = Duration.ofMinutes(5),
     val maxReceiveCount: Int = 5,
     val queueMetricsRefresh: Duration = Duration.ofSeconds(60),
-    val blockFor: Duration = Duration.ofDays(30),
 ) {
     init {
         require(batchSize in 1..MAX_BATCH_SIZE) {
@@ -23,7 +22,6 @@ data class DeliveryReportProperties(
         require(visibilityTimeout.isPositive) {
             "communication.email.delivery-reports.visibility-timeout må være større enn 0"
         }
-        require(blockFor.isPositive) { "communication.email.delivery-reports.block-for må være større enn 0" }
     }
 
     private companion object {

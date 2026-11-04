@@ -45,6 +45,11 @@ object DeliveryReportEvents {
                         """"complaintFeedbackType":"abuse"$time}"""
                 }
 
+                "Complaint/Suppressed" -> {
+                    """"complaint":{"complainedRecipients":[{"emailAddress":"$recipient"}],""" +
+                        """"complaintSubType":"OnAccountSuppressionList"$time}"""
+                }
+
                 "Reject" -> {
                     """"reject":{"reason":"Bad content"}"""
                 }

@@ -1,8 +1,6 @@
 package no.novari.communication.email.report
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
-import no.novari.communication.TEST_RECIPIENT_HASHING_KEY
-import no.novari.communication.blocklist.BlocklistRepository
 import no.novari.communication.message.MessageStore
 import no.novari.communication.message.StoredMessage
 import no.novari.communication.message.domain.MessageChannel
@@ -11,12 +9,9 @@ import no.novari.communication.message.domain.OutgoingMessage
 import no.novari.communication.model.FailureReason
 import no.novari.communication.model.MessageStatus
 import no.novari.communication.model.Tenant
-import no.novari.communication.recipient.RecipientHasher
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.springframework.dao.DataAccessResourceFailureException
-import org.springframework.jdbc.core.simple.JdbcClient
-import org.springframework.jdbc.datasource.SimpleDriverDataSource
 import org.springframework.transaction.support.TransactionOperations
 import tools.jackson.databind.json.JsonMapper
 import java.time.Clock
@@ -31,17 +26,11 @@ class DeliveryReportPollerTest {
     private val poller =
         DeliveryReportPoller(
             queue = queue,
-            parser =
-                DeliveryReportParser(
-                    JsonMapper.builder().build(),
-                    RecipientHasher.fromBase64Key(TEST_RECIPIENT_HASHING_KEY),
-                ),
+            parser = DeliveryReportParser(JsonMapper.builder().build()),
             processor =
                 DeliveryReportProcessor(
                     messageStore = store,
-                    blocklist = BlocklistRepository(JdbcClient.create(SimpleDriverDataSource())),
                     transactions = TransactionOperations.withoutTransaction(),
-                    blockFor = properties.blockFor,
                     clock = Clock.systemUTC(),
                 ),
             metrics = DeliveryReportMetrics(meterRegistry),

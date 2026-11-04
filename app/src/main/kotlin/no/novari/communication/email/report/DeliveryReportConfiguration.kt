@@ -1,9 +1,7 @@
 package no.novari.communication.email.report
 
 import io.micrometer.core.instrument.MeterRegistry
-import no.novari.communication.blocklist.BlocklistRepository
 import no.novari.communication.message.MessageStore
-import no.novari.communication.recipient.RecipientHasher
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBooleanProperty
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
@@ -30,10 +28,7 @@ class DeliveryReportConfiguration {
     }
 
     @Bean
-    fun deliveryReportParser(
-        jsonMapper: JsonMapper,
-        recipientHasher: RecipientHasher,
-    ): DeliveryReportParser = DeliveryReportParser(jsonMapper, recipientHasher)
+    fun deliveryReportParser(jsonMapper: JsonMapper): DeliveryReportParser = DeliveryReportParser(jsonMapper)
 
     @Bean
     fun deliveryReportMetrics(meterRegistry: MeterRegistry): DeliveryReportMetrics =
@@ -48,12 +43,9 @@ class DeliveryReportConfiguration {
     @Bean
     fun deliveryReportProcessor(
         messageStore: MessageStore,
-        blocklistRepository: BlocklistRepository,
         transactions: TransactionOperations,
-        properties: DeliveryReportProperties,
         clock: Clock,
-    ): DeliveryReportProcessor =
-        DeliveryReportProcessor(messageStore, blocklistRepository, transactions, properties.blockFor, clock)
+    ): DeliveryReportProcessor = DeliveryReportProcessor(messageStore, transactions, clock)
 
     @Bean
     fun deliveryReportPoller(

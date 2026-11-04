@@ -12,7 +12,11 @@ class DeliveryReportPoller(
 ) {
     private val log = KotlinLogging.logger {}
 
-    @Scheduled(fixedDelayString = "\${communication.email.delivery-reports.poll-interval}")
+    // The first poll waits one interval, so it never races a test that has just started the context.
+    @Scheduled(
+        fixedDelayString = "\${communication.email.delivery-reports.poll-interval}",
+        initialDelayString = "\${communication.email.delivery-reports.poll-interval}",
+    )
     fun poll() {
         val reports =
             try {
@@ -59,15 +63,13 @@ class DeliveryReportPoller(
         val message = processed.message
         if (message == null) {
             log.warn {
-                "Leveringsrapport for ukjent melding id=${report.messageId.value} sesEvent=${report.event.value} " +
-                    "blokkert=${processed.blocked.yesNo()}"
+                "Leveringsrapport for ukjent melding id=${report.messageId.value} sesEvent=${report.event.value}"
             }
             return
         }
         log.info {
             "Leveringsrapport id=${message.id.value} sesEvent=${report.event.value} status=${message.status} " +
-                "tenant=${message.tenant} channel=${message.channel} templateId=${message.templateId} " +
-                "blokkert=${processed.blocked.yesNo()}"
+                "tenant=${message.tenant} channel=${message.channel} templateId=${message.templateId}"
         }
     }
 
@@ -94,6 +96,4 @@ class DeliveryReportPoller(
 
     private fun describe(queued: QueuedReport): String =
         "kømelding=${queued.queueMessageId} forsøk=${queued.receiveCount}"
-
-    private fun Boolean.yesNo(): String = if (this) "ja" else "nei"
 }

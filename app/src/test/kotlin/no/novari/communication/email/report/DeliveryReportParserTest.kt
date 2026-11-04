@@ -1,8 +1,6 @@
 package no.novari.communication.email.report
 
-import no.novari.communication.TEST_RECIPIENT_HASHING_KEY
 import no.novari.communication.message.domain.MessageId
-import no.novari.communication.recipient.RecipientHasher
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
@@ -11,8 +9,7 @@ import tools.jackson.databind.json.JsonMapper
 import java.time.Instant
 
 class DeliveryReportParserTest {
-    private val hasher = RecipientHasher.fromBase64Key(TEST_RECIPIENT_HASHING_KEY)
-    private val parser = DeliveryReportParser(JsonMapper.builder().build(), hasher)
+    private val parser = DeliveryReportParser(JsonMapper.builder().build())
     private val messageId = MessageId.generate()
 
     @ParameterizedTest
@@ -25,7 +22,6 @@ class DeliveryReportParserTest {
                 DeliveryReport(
                     messageId = messageId,
                     event = event,
-                    recipient = if (event.blocks != null) hasher.hash("mottaker@rogfk.no") else null,
                     occurredAt =
                         if (event == SesDeliveryEvent.REJECTED) {
                             DeliveryReportEvents.MAIL_TIMESTAMP
@@ -67,17 +63,6 @@ class DeliveryReportParserTest {
     }
 
     @Test
-    fun `hashes the recipient only when the report blocks it`() {
-        val bounced = parse(DeliveryReportEvents.sesEvent(messageId, "Bounce/Permanent", recipient = " Ola@RogFK.no"))
-        val complained = parse(DeliveryReportEvents.sesEvent(messageId, "Complaint", recipient = "Ola@rogfk.no"))
-        val delivered = parse(DeliveryReportEvents.sesEvent(messageId, "Delivery"))
-
-        assertThat((bounced as ParsedReport.Report).report.recipient).isEqualTo(hasher.hash("ola@rogfk.no"))
-        assertThat((complained as ParsedReport.Report).report.recipient).isEqualTo(hasher.hash("ola@rogfk.no"))
-        assertThat((delivered as ParsedReport.Report).report.recipient).isNull()
-    }
-
-    @Test
     fun `other event types are unsupported`() {
         listOf("Send", "Open", "Click", "DeliveryDelay", "RenderingFailure", "Subscription").forEach {
             assertThat(
@@ -111,9 +96,7 @@ class DeliveryReportParserTest {
     fun `the parsed report does not expose the recipient`() {
         val parsed = parse(DeliveryReportEvents.sesEvent(messageId, "Bounce/Permanent", recipient = "ola@rogfk.no"))
 
-        assertThat(parsed.toString())
-            .doesNotContain("ola@rogfk.no")
-            .doesNotContain(hasher.hash("ola@rogfk.no").value)
+        assertThat(parsed.toString()).doesNotContain("ola@rogfk.no")
     }
 
     private fun parse(body: String): ParsedReport = parser.parse(body.toByteArray())

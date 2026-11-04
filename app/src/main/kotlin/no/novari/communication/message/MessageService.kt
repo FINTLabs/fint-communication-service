@@ -1,6 +1,5 @@
 package no.novari.communication.message
 
-import no.novari.communication.blocklist.RecipientBlocklist
 import no.novari.communication.limit.SendLimiter
 import no.novari.communication.message.dispatch.MessageDispatcher
 import no.novari.communication.message.domain.MessageId
@@ -18,7 +17,6 @@ class MessageService(
     private val messageStore: MessageStore,
     private val dispatcher: MessageDispatcher,
     private val recipientHasher: RecipientHasher,
-    private val recipientBlocklist: RecipientBlocklist,
     private val sendLimiter: SendLimiter,
     private val eventPublisher: ApplicationEventPublisher,
     private val clock: Clock,
@@ -30,7 +28,6 @@ class MessageService(
     ): MessageId {
         val message = OutgoingMessage.receive(tenant, payload, clock)
         val recipient = recipientHasher.hash(payload.to)
-        recipientBlocklist.checkNotBlocked(message, recipient)
         sendLimiter.checkAndRecord(message, recipient)
         messageStore.save(message)
         dispatcher.dispatch(message)

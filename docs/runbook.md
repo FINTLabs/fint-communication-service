@@ -1,7 +1,7 @@
-# Runbook: grenser, blokkerte innsendinger, utsending og leveringsrapporter
+# Runbook: grenser, utsending og leveringsrapporter
 
-Runbooken beskriver hva vakthavende gjør når et varsel for fint-communication-service går. Grensene og
-blokkeringslisten er beskrevet i [README](../README.md#grenser) og
+Runbooken beskriver hva vakthavende gjør når et varsel for fint-communication-service går. Grensene er
+beskrevet i [README](../README.md#grenser) og
 [arkitekturdokumentet](architecture.md#grenser), utsendingen i [README](../README.md#utsending) og
 [arkitekturdokumentet](architecture.md#hva-skjer-med-meldingen-etter-202), og leveringsrapportene i
 [README](../README.md#leveringsrapporter) og [arkitekturdokumentet](architecture.md#leveringsrapporter).
@@ -18,17 +18,17 @@ blokkeringslisten er beskrevet i [README](../README.md#grenser) og
 8. [Mottak av rapporter feiler](#mottak-av-rapporter-feiler)
 9. [Uten varsel](#uten-varsel)
 10. [Slå opp en melding](#slå-opp-en-melding)
-11. [Justere grenser](#justere-grenser)
-12. [Testvarsel](#testvarsel)
-13. [Verifisere utsending](#verifisere-utsending)
-14. [Verifisere leveringsrapporter](#verifisere-leveringsrapporter)
+11. [Stoppe e-post til en mottaker](#stoppe-e-post-til-en-mottaker)
+12. [Justere grenser](#justere-grenser)
+13. [Testvarsel](#testvarsel)
+14. [Verifisere utsending](#verifisere-utsending)
+15. [Verifisere leveringsrapporter](#verifisere-leveringsrapporter)
 
 ## Metrikker
 
 | Metrikk (Prometheus)                              | Type    | Tagger                                                                                                     | Betydning                                                        |
 |---------------------------------------------------|---------|------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------|
 | `communication_limit_rejected_total`              | Counter | `limit` (`mottaker`, `tenant`, `total`), `tenant`                                                          | Meldinger avvist med 429.                                        |
-| `communication_blocklist_rejected_total`          | Counter | `tenant`                                                                                                   | Meldinger avvist med 422 fordi mottakeren er blokkert.           |
 | `communication_message_accepted_total`            | Counter | `tenant`, `channel`                                                                                        | Meldinger akseptert med 202.                                     |
 | `communication_limit_tenant_usage_ratio`          | Gauge   | `tenant`, `window` (`hour`, `day`)                                                                         | Forbruk delt på tenantens grense i glidende vindu.               |
 | `communication_limit_total_usage_ratio`           | Gauge   | `window` (`hour`, `day`)                                                                                   | Forbruk delt på totalgrensen i glidende vindu.                   |
@@ -77,8 +77,6 @@ satt på pause hos SES. Resten står på dashboardet og i [Uten varsel](#uten-va
    ```logql
    {namespace="fintlabs-no", app="fint-communication-service"} |= "Grense overskredet" | json | line_format "{{.message}}"
    ```
-
-   For blokkerte innsendinger søker du etter `Mottaker blokkert`.
 3. Se forbruket per tenant og time direkte i databasen `fint-common` (bare siste døgn finnes):
 
    ```sql
@@ -160,8 +158,8 @@ i det hele tatt.
 
 ## Høy bounce-rate
 
-**Betyr:** mer enn 5 % av leveringsrapportene siste time er `BOUNCED`. Adressene blokkeres
-automatisk i 30 dager, men en høy rate skader omdømmet til avsenderdomenet, og AWS setter kontoen
+**Betyr:** mer enn 5 % av leveringsrapportene siste time er `BOUNCED`. SES slutter selv å sende
+til adressene, men en høy rate skader omdømmet til avsenderdomenet, og AWS setter kontoen
 under vurdering ved 5 % og kan sette sendingen på pause ved 10 % («Reputation metrics» i SES).
 
 **Finn årsaken:**
@@ -195,15 +193,12 @@ Disse står på dashboardet og i loggen, men varsles ikke:
 - **Mottaker-429** (`limit="mottaker"`): forventet i små mengder. Mange fra én tenant betyr at
   konsumenten sender ett varsel per hendelse i stedet for en oppsummering, eller ignorerer `429`.
   Kontakt teamet som eier konsumenten; mottakergrensen økes ikke.
-- **Blokkerte innsendinger** (`communication_blocklist_rejected_total`): konsumenten håndterer ikke `422`.
-  Er en mottaker blokkert ved en feil, fjernes blokkeringen med
-  [driftsrutinen for blokkeringslisten](../README.md#driftsrutine-for-blokkeringslisten).
-- **Klager** (`status="COMPLAINED"`): mottakerne blokkeres som opt-out. Klageraten mot SES' terskler
+- **Klager** (`status="COMPLAINED"`): SES slutter å sende til mottakerne. Klageraten mot SES' terskler
   (0,1 % vurdering, 0,5 % pause) følges i «Reputation metrics» i SES (FFS-2341). Gmail gir ingen klagedata.
 - **Forkastede rapporter** (`communication_delivery_report_discarded_total`): `reason="poison"` betyr at
   en rapport ble hentet 5 ganger uten å bli lagret, nesten alltid fordi databasen var nede i over
-  20 minutter. Status er da ikke oppdatert. Gjaldt den en bounce, står adressen på suppression-listen
-  i SES, og neste melding gir en `Bounce/Suppressed`-rapport som blokkerer den. `invalid` og
+  20 minutter. Status er da ikke oppdatert. Adressen står likevel på suppression-listen i SES ved en bounce
+  eller klage, så det sendes ikke til den igjen. `invalid` og
   `unsupported-type` betyr at configuration set-et publiserer andre hendelser, eller at noe annet enn
   SNS skriver til køen (se [Slå på leveringsrapporter](../README.md#slå-på-leveringsrapporter)).
   `unknown-message` er rapporter for meldinger som er slettet etter 60 dager.
@@ -234,6 +229,13 @@ eller `REJECTED`) fra leveringsrapporten. `updated_at` er da når rapporten ble 
 
 `404` eller ingen rad betyr at ID-en er ukjent, eller at meldingen ble mottatt for mer enn 60 dager
 siden og er slettet. Mer om hva som skjedde, finnes i Loki (søk på ID-en).
+
+## Stoppe e-post til en mottaker
+
+Ber noen om å slippe e-post, kontakter du teamet som sendte; teamet fjerner mottakeren i sitt eget
+system. Tjenesten har ingen egen blokkeringsliste. Haster det, og teamet ikke kan stoppe utsendingen
+raskt nok, legger du adressen på suppression-listen i SES. Kommandoene, også for å fjerne en adresse
+igjen, står i [README](../README.md#suppression-i-ses).
 
 ## Justere grenser
 
@@ -310,33 +312,24 @@ være verifisert i SES.
 
 ## Verifisere leveringsrapporter
 
-Bekrefter at leveringsrapportene fra SES gir status og blokkering i beta. Forutsetter at SES og
+Bekrefter at leveringsrapportene fra SES gir status i beta. Forutsetter at SES og
 mottaket av leveringsrapporter er slått på (se [README](../README.md#slå-på-leveringsrapporter)).
 SES har en egen simulator for testing, som virker også i sandkassen og ikke teller mot bounce-raten.
 
 1. Åpne en port til tjenesten som i [Verifisere utsending](#verifisere-utsending).
 2. Send testmalen til simulatoradressene `success@simulator.amazonses.com`,
-   `bounce@simulator.amazonses.com` og `complaint@simulator.amazonses.com`:
+   `bounce@simulator.amazonses.com`, `complaint@simulator.amazonses.com` og
+   `suppressionlist@simulator.amazonses.com`:
 
    ```bash
    curl -i -X POST localhost:8080/api/v1/messages -H 'Content-Type: application/json' -d '{"tenant":"NOVARI","message":{"channel":"EMAIL","to":"<adresse>","templateId":"novari/test","variables":{"melding":"Verifisering av leveringsrapporter"}}}'
    ```
 3. Vent et par minutter, og bekreft:
-   - `GET /api/v1/messages/<ID>` gir `DELIVERED` for `success@…`, `BOUNCED` for `bounce@…` og
-     `DELIVERED` for `complaint@…`,
-   - loggen har `Leveringsrapport id=<ID> sesEvent=Bounce/Permanent status=BOUNCED … blokkert=ja` og
-     `sesEvent=Complaint … blokkert=ja`,
-   - `communication_delivery_report_received_total{tenant="NOVARI", status="BOUNCED"}` har økt,
-   - en ny melding til `bounce@…` eller `complaint@…` gir `422`,
-   - blokkeringene ligger i databasen med `source = 'SES'`, `HARD_BOUNCE` med utløp om 30 dager og
-     `OPT_OUT` uten utløp (hashen beregnes som i
-     [driftsrutinen](../README.md#driftsrutine-for-blokkeringslisten)):
-
-     ```sql
-     SELECT reason, source, created_at, expires_at FROM recipient_blocklist WHERE recipient_hash = '<hash>';
-     ```
-
-4. Fjern blokkeringene etterpå med SQL-en i driftsrutinen.
+   - `GET /api/v1/messages/<ID>` gir `DELIVERED` for `success@…`, `BOUNCED` for `bounce@…`,
+     `DELIVERED` for `complaint@…` og `SUPPRESSED` for `suppressionlist@…`,
+   - loggen har `Leveringsrapport id=<ID> sesEvent=Bounce/Permanent status=BOUNCED` og
+     `sesEvent=Complaint`,
+   - `communication_delivery_report_received_total{tenant="NOVARI", status="BOUNCED"}` har økt.
 
 Det er ikke verifisert om SNS-abonnementet leverer med eller uten SNS-konvolutt (begge leses).
 Oppdater dette avsnittet med det du ser første gang.

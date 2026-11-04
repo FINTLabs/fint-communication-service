@@ -1,7 +1,3 @@
-ALTER TABLE recipient_blocklist
-    DROP CONSTRAINT recipient_blocklist_source,
-    ADD CONSTRAINT recipient_blocklist_source CHECK (source IN ('MANUAL', 'SES'));
-
 ALTER TABLE message
     DROP CONSTRAINT message_status,
     ADD CONSTRAINT message_status

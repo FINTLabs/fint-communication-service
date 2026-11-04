@@ -3,7 +3,6 @@ package no.novari.communication.email.report
 import io.micrometer.core.instrument.MeterRegistry
 import no.novari.communication.ControllableEmailAdapter
 import no.novari.communication.MutableClock
-import no.novari.communication.blocklist.RecipientBlockedException
 import no.novari.communication.email.EmailSendOutcome
 import no.novari.communication.email.RetryReason
 import no.novari.communication.message.MessageService
@@ -15,7 +14,6 @@ import no.novari.communication.message.domain.MessageId
 import no.novari.communication.model.FailureReason
 import no.novari.communication.model.MessageStatus
 import no.novari.communication.model.Tenant
-import no.novari.communication.recipient.RecipientHasher
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -25,8 +23,6 @@ import software.amazon.awssdk.services.sqs.SqsClient
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName
 import java.time.Duration
 import java.time.Instant
-import java.time.OffsetDateTime
-import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicInteger
 
 @DeliveryReportTest
@@ -36,9 +32,6 @@ class DeliveryReportIntegrationTest {
 
     @Autowired
     lateinit var queueMetrics: DeliveryReportQueueMetrics
-
-    @Autowired
-    lateinit var processor: DeliveryReportProcessor
 
     @Autowired
     lateinit var messageService: MessageService
@@ -51,9 +44,6 @@ class DeliveryReportIntegrationTest {
 
     @Autowired
     lateinit var emailAdapter: ControllableEmailAdapter
-
-    @Autowired
-    lateinit var hasher: RecipientHasher
 
     @Autowired
     lateinit var clock: MutableClock
@@ -76,7 +66,6 @@ class DeliveryReportIntegrationTest {
     fun setUp() {
         sqs.purgeQueue { it.queueUrl(queueUrl.value) }
         jdbcClient.sql("DELETE FROM send_usage").update()
-        jdbcClient.sql("DELETE FROM recipient_blocklist").update()
         jdbcClient.sql("DELETE FROM dispatch_queue").update()
         jdbcClient.sql("DELETE FROM message").update()
         emailAdapter.reset()
@@ -84,7 +73,7 @@ class DeliveryReportIntegrationTest {
     }
 
     @Test
-    fun `every SES event gives the expected status and blocks bounced, suppressed and complaining recipients`() {
+    fun `every SES event gives the expected status`() {
         val expected =
             mapOf(
                 SesDeliveryEvent.DELIVERED to (MessageStatus.DELIVERED to null),
@@ -93,6 +82,7 @@ class DeliveryReportIntegrationTest {
                 SesDeliveryEvent.SOFT_BOUNCED to (MessageStatus.FAILED to FailureReason.DELIVERY_FAILED),
                 SesDeliveryEvent.REJECTED to (MessageStatus.FAILED to FailureReason.REJECTED),
                 SesDeliveryEvent.COMPLAINED to (MessageStatus.SENT to null),
+                SesDeliveryEvent.COMPLAINT_SUPPRESSED to (MessageStatus.SUPPRESSED to null),
             )
         val sent = expected.keys.associateWith { event -> nextRecipient().let { it to sendAndDispatch(it) } }
         val before = listOf("BOUNCED", "FAILED", "COMPLAINED").associateWith(::received)
@@ -101,13 +91,9 @@ class DeliveryReportIntegrationTest {
         pollUntilEmpty()
 
         sent.forEach { (event, message) ->
-            val (address, id) = message
-            val stored = stored(id)
+            val stored = stored(message.second)
             assertThat(stored.status to stored.failureReason).describedAs(event.value).isEqualTo(expected[event])
-            assertThat(blocklistReason(address)).describedAs(event.value).isEqualTo(event.blocks?.name)
         }
-        assertThat(blocklistExpiry(sent.getValue(SesDeliveryEvent.BOUNCED).first))
-            .isEqualTo(OCCURRED_AT + Duration.ofDays(30))
         assertThat(queueSize()).isZero()
         assertThat(received("BOUNCED") - before.getValue("BOUNCED")).isEqualTo(1.0)
         assertThat(received("FAILED") - before.getValue("FAILED")).isEqualTo(2.0)
@@ -115,7 +101,7 @@ class DeliveryReportIntegrationTest {
     }
 
     @Test
-    fun `a complaint after delivery keeps the status and blocks the recipient as opt-out`() {
+    fun `a complaint after delivery keeps the status`() {
         val address = nextRecipient()
         val id = sendAndDispatch(address)
         enqueue(event(id, "Delivery", address))
@@ -125,37 +111,6 @@ class DeliveryReportIntegrationTest {
         pollUntilEmpty()
 
         assertThat(stored(id).status).isEqualTo(MessageStatus.DELIVERED)
-        assertThat(blocklistReason(address)).isEqualTo("OPT_OUT")
-        assertThat(runCatching { send(address) }.exceptionOrNull())
-            .isInstanceOf(RecipientBlockedException::class.java)
-    }
-
-    @Test
-    fun `a blocked recipient is rejected on the next message`() {
-        val address = nextRecipient()
-        enqueue(event(sendAndDispatch(address), "Bounce/Permanent", address))
-
-        pollUntilEmpty()
-
-        assertThat(blocklistSource(address)).isEqualTo("SES")
-        assertThat(runCatching { send(address) }.exceptionOrNull())
-            .isInstanceOf(RecipientBlockedException::class.java)
-    }
-
-    @Test
-    fun `a recipient is blocked only when the status blocks it`() {
-        val address = nextRecipient()
-        val nonBlocking = SesDeliveryEvent.entries.filter { it.blocks == null }
-
-        val processed =
-            nonBlocking.map { event ->
-                processor.process(
-                    DeliveryReport(sendAndDispatch(nextRecipient()), event, hasher.hash(address), OCCURRED_AT),
-                )
-            }
-
-        assertThat(processed).allSatisfy { assertThat(it.blocked).isFalse() }
-        assertThat(blocklistReason(address)).isNull()
     }
 
     @Test
@@ -166,14 +121,12 @@ class DeliveryReportIntegrationTest {
         enqueue(event)
         pollUntilEmpty()
         val first = stored(id)
-        val firstExpiry = blocklistExpiry(address)
 
         clock.advance(Duration.ofHours(1))
         enqueue(event)
         pollUntilEmpty()
 
         assertThat(stored(id)).isEqualTo(first)
-        assertThat(blocklistExpiry(address)).isEqualTo(firstExpiry)
         assertThat(queueSize()).isZero()
     }
 
@@ -226,7 +179,7 @@ class DeliveryReportIntegrationTest {
     }
 
     @Test
-    fun `a report for an unknown message is discarded but still blocks a bounced recipient`() {
+    fun `a report for an unknown message is discarded`() {
         val bounced = nextRecipient()
         val delivered = nextRecipient()
         val before = discarded(DiscardReason.UNKNOWN_MESSAGE)
@@ -235,43 +188,8 @@ class DeliveryReportIntegrationTest {
 
         pollUntilEmpty()
 
-        assertThat(blocklistExpiry(bounced)).isEqualTo(OCCURRED_AT + Duration.ofDays(30))
-        assertThat(blocklistExpiry(delivered)).isNull()
         assertThat(discarded(DiscardReason.UNKNOWN_MESSAGE) - before).isEqualTo(2.0)
         assertThat(queueSize()).isZero()
-    }
-
-    @Test
-    fun `a bounce extends the blocking but never shortens it and leaves an opt-out alone`() {
-        val address = nextRecipient()
-        val hash = hasher.hash(address).value
-        val manualExpiry = OCCURRED_AT + Duration.ofDays(40)
-        jdbcClient
-            .sql(
-                """
-                INSERT INTO recipient_blocklist (recipient_hash, reason, source, expires_at)
-                VALUES (:hash, 'HARD_BOUNCE', 'MANUAL', :expiresAt), (:hash, 'OPT_OUT', 'MANUAL', NULL)
-                """.trimIndent(),
-            ).param("hash", hash)
-            .param("expiresAt", OffsetDateTime.ofInstant(manualExpiry, ZoneOffset.UTC))
-            .update()
-
-        enqueue(event(MessageId.generate(), "Bounce/Permanent", address))
-        pollUntilEmpty()
-        assertThat(blocklistExpiry(address)).isEqualTo(manualExpiry)
-
-        val later = OCCURRED_AT + Duration.ofDays(20)
-        enqueue(event(MessageId.generate(), "Bounce/Suppressed", address, later))
-        pollUntilEmpty()
-
-        assertThat(blocklistExpiry(address)).isEqualTo(later + Duration.ofDays(30))
-        assertThat(
-            jdbcClient
-                .sql("SELECT count(*) FROM recipient_blocklist WHERE recipient_hash = :hash AND reason = 'OPT_OUT'")
-                .param("hash", hash)
-                .query(Long::class.java)
-                .single(),
-        ).isEqualTo(1L)
     }
 
     @Test
@@ -384,30 +302,6 @@ class DeliveryReportIntegrationTest {
 
     private fun queuedMessages(): Long =
         jdbcClient.sql("SELECT count(*) FROM dispatch_queue").query(Long::class.java).single()
-
-    private fun blocklistExpiry(address: String): Instant? =
-        jdbcClient
-            .sql("SELECT expires_at FROM recipient_blocklist WHERE recipient_hash = :hash AND reason = 'HARD_BOUNCE'")
-            .param("hash", hasher.hash(address).value)
-            .query { rs, _ -> rs.getObject("expires_at", OffsetDateTime::class.java).toInstant() }
-            .optional()
-            .orElse(null)
-
-    private fun blocklistReason(address: String): String? =
-        jdbcClient
-            .sql("SELECT reason FROM recipient_blocklist WHERE recipient_hash = :hash")
-            .param("hash", hasher.hash(address).value)
-            .query(String::class.java)
-            .optional()
-            .orElse(null)
-
-    private fun blocklistSource(address: String): String? =
-        jdbcClient
-            .sql("SELECT source FROM recipient_blocklist WHERE recipient_hash = :hash AND reason = 'HARD_BOUNCE'")
-            .param("hash", hasher.hash(address).value)
-            .query(String::class.java)
-            .optional()
-            .orElse(null)
 
     private fun received(status: String): Double =
         meterRegistry

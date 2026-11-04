@@ -2,11 +2,8 @@ package no.novari.communication.email.report
 
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
-import no.novari.communication.TEST_RECIPIENT_HASHING_KEY
-import no.novari.communication.blocklist.BlocklistRepository
 import no.novari.communication.message.DatabaseMessageStore
 import no.novari.communication.message.MessageStore
-import no.novari.communication.recipient.RecipientHasher
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
@@ -22,9 +19,7 @@ class DeliveryReportConfigurationTest {
         ApplicationContextRunner()
             .withUserConfiguration(DeliveryReportConfiguration::class.java)
             .withBean(JsonMapper::class.java, { JsonMapper.builder().build() })
-            .withBean(RecipientHasher::class.java, { RecipientHasher.fromBase64Key(TEST_RECIPIENT_HASHING_KEY) })
             .withBean(MessageStore::class.java, { DatabaseMessageStore(unusedJdbcClient) })
-            .withBean(BlocklistRepository::class.java, { BlocklistRepository(unusedJdbcClient) })
             .withBean(TransactionOperations::class.java, { TransactionOperations.withoutTransaction() })
             .withBean(Clock::class.java, { Clock.systemUTC() })
             .withBean(MeterRegistry::class.java, { SimpleMeterRegistry() })

@@ -2,7 +2,6 @@ package no.novari.communication.email.report
 
 import no.novari.communication.email.SesEmailAdapter
 import no.novari.communication.message.domain.MessageId
-import no.novari.communication.recipient.RecipientHasher
 import tools.jackson.core.JacksonException
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.json.JsonMapper
@@ -13,7 +12,6 @@ import java.util.UUID
 
 class DeliveryReportParser(
     private val jsonMapper: JsonMapper,
-    private val recipientHasher: RecipientHasher,
 ) {
     fun parse(body: ByteArray): ParsedReport {
         val event = readEvent(body) ?: return ParsedReport.Invalid
@@ -27,27 +25,21 @@ class DeliveryReportParser(
                 ?.takeIf { it.isString }
                 ?.asString()
                 ?.let(::uuidOrNull) ?: return ParsedReport.Invalid
-        val (deliveryEvent, details, recipients) =
+        val (deliveryEvent, details) =
             when (eventType) {
-                "Delivery" -> Triple(SesDeliveryEvent.DELIVERED, event.path("delivery"), null)
+                "Delivery" -> SesDeliveryEvent.DELIVERED to event.path("delivery")
                 "Bounce" -> bounce(event.path("bounce")) ?: return ParsedReport.Invalid
-                "Complaint" -> Triple(SesDeliveryEvent.COMPLAINED, event.path("complaint"), "complainedRecipients")
-                "Reject" -> Triple(SesDeliveryEvent.REJECTED, event.path("reject"), null)
+                "Complaint" -> complaint(event.path("complaint"))
+                "Reject" -> SesDeliveryEvent.REJECTED to event.path("reject")
                 else -> return ParsedReport.Unsupported
             }
         val occurredAt =
             (details.text("timestamp") ?: mail.text("timestamp"))?.let(::instantOrNull)
                 ?: return ParsedReport.Invalid
-        val recipient =
-            if (deliveryEvent.blocks != null) {
-                recipientAddress(details, recipients, mail)?.let(recipientHasher::hash)
-            } else {
-                null
-            }
-        return ParsedReport.Report(DeliveryReport(MessageId(messageId), deliveryEvent, recipient, occurredAt))
+        return ParsedReport.Report(DeliveryReport(MessageId(messageId), deliveryEvent, occurredAt))
     }
 
-    private fun bounce(bounce: JsonNode): Triple<SesDeliveryEvent, JsonNode, String>? {
+    private fun bounce(bounce: JsonNode): Pair<SesDeliveryEvent, JsonNode>? {
         val event =
             when (bounce.text("bounceType")) {
                 "Permanent" -> {
@@ -66,21 +58,15 @@ class DeliveryReportParser(
                     return null
                 }
             }
-        return Triple(event, bounce, "bouncedRecipients")
+        return event to bounce
     }
 
-    private fun recipientAddress(
-        details: JsonNode,
-        recipients: String?,
-        mail: JsonNode,
-    ): String? =
-        recipients
-            ?.let { details.path(it).firstOrNull()?.text("emailAddress") }
-            ?: mail
-                .path("destination")
-                .firstOrNull()
-                ?.takeIf { it.isString }
-                ?.asString()
+    private fun complaint(complaint: JsonNode): Pair<SesDeliveryEvent, JsonNode> =
+        if (complaint.text("complaintSubType") == ON_ACCOUNT_SUPPRESSION_LIST) {
+            SesDeliveryEvent.COMPLAINT_SUPPRESSED to complaint
+        } else {
+            SesDeliveryEvent.COMPLAINED to complaint
+        }
 
     private fun readEvent(body: ByteArray): JsonNode? {
         val node = readTree(body.toString(Charsets.UTF_8)) ?: return null
@@ -115,6 +101,7 @@ class DeliveryReportParser(
 
     private companion object {
         const val SNS_NOTIFICATION = "Notification"
-        val SUPPRESSED_SUBTYPES = setOf("Suppressed", "OnAccountSuppressionList")
+        const val ON_ACCOUNT_SUPPRESSION_LIST = "OnAccountSuppressionList"
+        val SUPPRESSED_SUBTYPES = setOf("Suppressed", ON_ACCOUNT_SUPPRESSION_LIST)
     }
 }
