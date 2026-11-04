@@ -18,8 +18,9 @@ Se [docs/architecture.md](docs/architecture.md) for arkitektur, dataflyt og sekv
 meldings-ID. Meldingen legges i en kø i databasen og sendes asynkront via leverandøren som er
 konfigurert (se [Utsending](#utsending)). Status for meldingen slås opp med
 `GET /api/v1/messages/{id}` (se [Status for en melding](#status-for-en-melding)). Hver mottaker kan få høyst 10 meldinger per time og 40
-per døgn (se [Grenser](#grenser)). Ingen e-postleverandør er koblet til ennå, så alle
-miljøer bruker leverandøren `logging`, som logger og forkaster meldingen. Layout og autentisering kommer i egne oppgaver under
+per døgn (se [Grenser](#grenser)). Amazon SES er klar i koden, men kontoen og domenet
+finnes ikke ennå, så alle miljøer bruker foreløpig leverandøren `logging`, som logger og forkaster
+meldingen. Layout og autentisering kommer i egne oppgaver under
 [FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
 
 ## Moduler
@@ -135,7 +136,9 @@ kontroll.
 | Totalt       | `total`    | 500   | Siste 60 minutter | Ikke bekreftet* |
 | Totalt       | `total`    | 2000  | Siste 24 timer    | Ikke bekreftet* |
 
-\* Foreslåtte startverdier uten trafikktall. De må bekreftes med PO/Flais før produksjon.
+\* Foreslåtte startverdier uten trafikktall. De må bekreftes med PO/Flais før produksjon. Beta har
+8 per time og 100 per døgn både per tenant og totalt (overlayet), under kvoten i SES-sandkassen (se
+[Amazon SES](#amazon-ses)).
 
 - Mottakeren er adressen etter `trim` og små bokstaver, felles for alle tenants. `ola+test@rogfk.no`
   er en annen mottaker enn `ola@rogfk.no`.
@@ -245,9 +248,31 @@ Status og tidspunkter ligger i tabellen `message` i 60 dager etter mottak, uten 
 og kan slås opp med `GET /api/v1/messages/{id}` (se [Status for en melding](#status-for-en-melding)).
 Leverandøren velges med `communication.email.provider`:
 
-| Verdi     | Adapter               | Bruk                                                                                                        |
-|-----------|-----------------------|-------------------------------------------------------------------------------------------------------------|
-| `logging` | `LoggingEmailAdapter` | Default. Logger meldings-ID og mal og regner meldingen som sendt. Lokalt, i tester og i beta inntil videre. |
+| Verdi     | Adapter               | Bruk                                                                                                              |
+|-----------|-----------------------|-------------------------------------------------------------------------------------------------------------------|
+| `logging` | `LoggingEmailAdapter` | Default. Logger meldings-ID og mal og regner meldingen som sendt. Lokalt, i tester og i beta til SES er satt opp. |
+| `ses`     | `SesEmailAdapter`     | Sender via Amazon SES. Krever avsenderadresse og AWS-nøkler.                                                      |
+
+### Amazon SES
+
+`SesEmailAdapter` sender med AWS SDK v2 (`sesv2`, `SendEmail`) i regionen fra
+`communication.email.ses.region`. SES svarer synkront, så `200` betyr `SENT`; om meldingen kom fram,
+vises først i leveringsrapportene.
+
+- **Innhold:** avsender fra `communication.email.sender`, én mottaker, emne og HTML fra malen,
+  `replyTo` fra malen. Ingen vedlegg, kopi eller blindkopi.
+- **Sporing:** tjenesten ber ikke om åpnings- eller klikksporing. Configuration set-et i SES må heller
+  ikke ha det slått på.
+- **Meldings-ID:** sendes som tag `messageId`, så leveringsrapportene kan knyttes til meldingen.
+- **Duplikater:** SES har ingen idempotensnøkkel. Kommer svaret ikke fram etter at SES har tatt imot
+  meldingen (timeout, nettverksfeil), kan et nytt forsøk gi to e-poster.
+- **Nye forsøk:** SDK-et prøver selv på nytt ved struping, 5xx og nettverksfeil (SDK-ets
+  standardinnstilling), og hvert kall har et tak på 30 sekunder. Etter det tar køen over.
+- **Sandkasse:** en ny SES-konto kan bare sende til verifiserte adresser, høyst 200 per døgn og 1 per
+  sekund. Produksjonstilgang søkes om hos AWS, og gir en egen kvote per døgn og per sekund. Grensene
+  i tjenesten må være under kvoten, slik at en konsument får `429` fra tjenesten før SES struper.
+- **Konto i pause:** setter AWS sendingen på pause (f.eks. for høy bounce-rate), regnes svaret som
+  forbigående (`unauthorized`), og meldingene sendes når pausen er opphevet, innen forsøkene er brukt opp.
 
 ## Lokal utvikling
 
@@ -281,24 +306,29 @@ Loggen er JSON, også lokalt og i testene. Lesbar tekst får man med et tomt for
 
 ## Konfigurasjon
 
-| Variabel                                                                                                              | Innhold                                                                                                |
-|-----------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|
-| `fint.database.url`, `fint.database.username`, `fint.database.password`                                               | Settes av Flais fra `spec.database` (`fint-common`).                                                   |
-| `COMMUNICATION_RECIPIENT_HASHING_KEY`                                                                                 | HMAC-nøkkel for mottaker-hashing, base64, minst 32 bytes. Fra 1Password. Oppstarten feiler uten den.   |
-| `COMMUNICATION_DISPATCH_ENCRYPTION_KEY`                                                                               | AES-nøkkel for innholdet i køen, base64, nøyaktig 32 bytes. Fra 1Password. Oppstarten feiler uten den. |
-| `communication.email.provider`                                                                                        | `logging` (default). Ukjent verdi stopper oppstarten.                                                  |
-| `communication.dispatch.poll-interval`, `communication.dispatch.batch-size`                                           | Hvor ofte køen sjekkes (`2s`) og hvor mange meldinger som hentes om gangen (`10`).                     |
-| `communication.dispatch.lease`                                                                                        | Hvor lenge en melding er reservert av en pod før en annen kan ta den (`5m`).                           |
-| `communication.dispatch.max-attempts`, `communication.dispatch.initial-backoff`, `communication.dispatch.max-backoff` | Antall forsøk og ventetid mellom dem (`8`, `1m`, `1h`).                                                |
-| `communication.retention.metadata`, `communication.retention.cleanup-cron`                                            | Hvor lenge status per melding beholdes (`60d`), og når opprydningen kjører (kl. 03.15 hver natt).      |
-| `communication.dispatch.queue-metrics-refresh`                                                                        | Hvor ofte kø-metrikkene regnes ut fra databasen (`60s`).                                               |
-| `communication.limits.recipient.per-hour`, `communication.limits.recipient.per-day`                                   | Grenser per mottaker (10 og 40) i `application.yaml`.                                                  |
-| `communication.limits.tenant.default.per-hour`, `communication.limits.tenant.default.per-day`                         | Grenser per tenant (100 og 500, ikke bekreftet) i `application.yaml`.                                  |
-| `communication.limits.tenant.overrides.<TENANT>.per-hour`, `...per-day`                                               | Valgfri override per tenant. Nøkkelen er enum-navnet i `Tenant`, og begge feltene må settes.           |
-| `communication.limits.total.per-hour`, `communication.limits.total.per-day`                                           | Grenser for alle tenants samlet (500 og 2000, ikke bekreftet) i `application.yaml`.                    |
-| `communication.limits.usage-refresh`                                                                                  | Hvor ofte utnyttelsen av grensene regnes ut fra databasen. `60s` i `application.yaml`.                 |
-| `logging.structured.format.console`                                                                                   | Loggformat. `logstash` (JSON til stdout) i `application.yaml`.                                         |
-| `logging.level.<pakke>` (eller `LOGGING_LEVEL_<PAKKE>`)                                                               | Log-nivå per pakke, f.eks. `logging.level.no.novari.communication=DEBUG`. Default `INFO`.              |
+| Variabel                                                                                                              | Innhold                                                                                                                           |
+|-----------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| `fint.database.url`, `fint.database.username`, `fint.database.password`                                               | Settes av Flais fra `spec.database` (`fint-common`).                                                                              |
+| `COMMUNICATION_RECIPIENT_HASHING_KEY`                                                                                 | HMAC-nøkkel for mottaker-hashing, base64, minst 32 bytes. Fra 1Password. Oppstarten feiler uten den.                              |
+| `COMMUNICATION_DISPATCH_ENCRYPTION_KEY`                                                                               | AES-nøkkel for innholdet i køen, base64, nøyaktig 32 bytes. Fra 1Password. Oppstarten feiler uten den.                            |
+| `communication.email.provider`                                                                                        | `logging` (default) eller `ses`. Ukjent verdi stopper oppstarten.                                                                 |
+| `communication.email.sender`                                                                                          | Avsenderadressen. Påkrevd med `ses`, og domenet må være verifisert i SES.                                                         |
+| `communication.email.ses.region`                                                                                      | AWS-regionen til SES (`eu-north-1`, Stockholm).                                                                                   |
+| `communication.email.ses.configuration-set`                                                                           | Configuration set i SES. Valgfri; trengs for leveringsrapporter.                                                                  |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`                                                                          | Nøkler til IAM-brukeren som sender. Fra 1Password. Påkrevd med `ses`.                                                             |
+| `communication.dispatch.poll-interval`, `communication.dispatch.batch-size`                                           | Hvor ofte køen sjekkes (`2s`) og hvor mange meldinger som hentes om gangen (`10`).                                                |
+| `communication.dispatch.lease`                                                                                        | Hvor lenge en melding er reservert av en pod før en annen kan ta den (`5m`).                                                      |
+| `communication.dispatch.max-attempts`, `communication.dispatch.initial-backoff`, `communication.dispatch.max-backoff` | Antall forsøk og ventetid mellom dem (`8`, `1m`, `1h`).                                                                           |
+| `communication.retention.metadata`, `communication.retention.cleanup-cron`                                            | Hvor lenge status per melding beholdes (`60d`), og når opprydningen kjører (kl. 03.15 hver natt).                                 |
+| `communication.dispatch.queue-metrics-refresh`                                                                        | Hvor ofte kø-metrikkene regnes ut fra databasen (`60s`).                                                                          |
+| `communication.limits.recipient.per-hour`, `communication.limits.recipient.per-day`                                   | Grenser per mottaker (10 og 40) i `application.yaml`.                                                                             |
+| `communication.limits.tenant.default.per-hour`, `communication.limits.tenant.default.per-day`                         | Grenser per tenant (100 og 500, ikke bekreftet) i `application.yaml`.                                                             |
+| `communication.limits.tenant.overrides.<TENANT>.per-hour`, `...per-day`                                               | Valgfri override per tenant. Nøkkelen er enum-navnet i `Tenant`, og begge feltene må settes.                                      |
+| `communication.limits.total.per-hour`, `communication.limits.total.per-day`                                           | Grenser for alle tenants samlet (500 og 2000, ikke bekreftet) i `application.yaml`.                                               |
+| `communication.limits.usage-refresh`                                                                                  | Hvor ofte utnyttelsen av grensene regnes ut fra databasen. `60s` i `application.yaml`.                                            |
+| `logging.structured.format.console`                                                                                   | Loggformat. `logstash` (JSON til stdout) i `application.yaml`.                                                                    |
+| `logging.level.<pakke>` (eller `LOGGING_LEVEL_<PAKKE>`)                                                               | Log-nivå per pakke, f.eks. `logging.level.no.novari.communication=DEBUG`. Default `INFO`.                                         |
+| `logging.level.software.amazon.awssdk`                                                                                | `off` i `application.yaml`. AWS-SDK-ets logger kan sitere adresser fra svarene til SES; ikke skru den på i beta eller produksjon. |
 
 Alle grenser må være større enn 0, og `per-day` minst like stor som `per-hour`. Tenantgrensene
 (`default` og hver override) kan ikke være høyere enn totalgrensen. Ukjent tenant i `overrides` eller
@@ -445,6 +475,32 @@ manuelt. Produksjon (`api`) er ikke satt opp ennå.
 Beta henter hemmeligheter fra 1Password-itemet `vaults/aks-beta-vault/items/fint-communication-service`,
 som må ha feltene `COMMUNICATION_RECIPIENT_HASHING_KEY` og `COMMUNICATION_DISPATCH_ENCRYPTION_KEY`.
 Mangler et av dem, starter ikke podden.
+
+### Slå på SES
+
+Når SES-kontoen, domenet og avsenderadressen finnes:
+
+1. Legg nøklene til IAM-brukeren (med bare `ses:SendEmail`) inn som feltene `AWS_ACCESS_KEY_ID` og
+   `AWS_SECRET_ACCESS_KEY` i 1Password-itemet.
+2. Sett leverandør og avsender i overlayet og deploy:
+
+   ```yaml
+   - op: add
+     path: "/spec/env/-"
+     value:
+       name: "communication.email.provider"
+       value: "ses"
+   - op: add
+     path: "/spec/env/-"
+     value:
+       name: "communication.email.sender"
+       value: "no-reply@<verifisert domene>"
+   ```
+
+3. Følg [Verifisere utsending](docs/runbook.md#verifisere-utsending) i runbooken.
+
+Mangler avsenderen når leverandøren er `ses`, stopper oppstarten. Mangler nøklene, feiler hver
+sending og blir liggende i køen til nøklene er på plass eller forsøkene er brukt opp.
 
 ## Låsing av avhengigheter
 
