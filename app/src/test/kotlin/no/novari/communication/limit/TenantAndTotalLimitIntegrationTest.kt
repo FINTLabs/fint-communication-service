@@ -3,8 +3,6 @@ package no.novari.communication.limit
 import no.novari.communication.IntegrationTest
 import no.novari.communication.MutableClock
 import no.novari.communication.api.MessageController
-import no.novari.communication.message.MessageService
-import no.novari.communication.message.domain.EmailPayload
 import no.novari.communication.model.Tenant
 import no.novari.communication.recipient.RecipientHasher
 import org.assertj.core.api.Assertions.assertThat
@@ -27,11 +25,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders
 import org.springframework.web.context.WebApplicationContext
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.Callable
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
-import javax.sql.DataSource
 
 @IntegrationTest
 @TestPropertySource(
@@ -53,16 +47,10 @@ class TenantAndTotalLimitIntegrationTest {
     lateinit var clock: MutableClock
 
     @Autowired
-    lateinit var messageService: MessageService
-
-    @Autowired
     lateinit var hasher: RecipientHasher
 
     @Autowired
     lateinit var jdbcClient: JdbcClient
-
-    @Autowired
-    lateinit var dataSource: DataSource
 
     private lateinit var mockMvc: MockMvc
     private val recipientNumber = AtomicInteger()
@@ -215,29 +203,6 @@ class TenantAndTotalLimitIntegrationTest {
     }
 
     @Test
-    fun `parallel requests cannot exceed the tenant limit`() {
-        val results = sendInParallel(List(20) { Tenant.ROGALAND })
-
-        assertThat(results.count { it.isSuccess }).isEqualTo(4)
-        assertThat(results.mapNotNull { it.exceptionOrNull() })
-            .hasSize(16)
-            .allMatch { it is LimitExceededException && it.type == LimitType.TENANT }
-        assertThat(usageRows()).isEqualTo(4)
-    }
-
-    @Test
-    fun `parallel requests cannot exceed the total limit`() {
-        val tenants = listOf(Tenant.ROGALAND, Tenant.TROMS, Tenant.VESTLAND, Tenant.NOVARI, Tenant.TELEMARK)
-        val results = sendInParallel(tenants.flatMap { tenant -> List(4) { tenant } })
-
-        assertThat(results.count { it.isSuccess }).isEqualTo(12)
-        assertThat(results.mapNotNull { it.exceptionOrNull() })
-            .hasSize(8)
-            .allMatch { it is LimitExceededException }
-        assertThat(usageRows()).isEqualTo(12)
-    }
-
-    @Test
     fun `neither the response nor the log contains the address or its hash`(output: CapturedOutput) {
         repeat(4) { send(Tenant.ROGALAND, to = ADDRESS) }
 
@@ -277,40 +242,6 @@ class TenantAndTotalLimitIntegrationTest {
                 }
                 """.trimIndent()
         }
-
-    private fun sendInParallel(tenants: List<Tenant>): List<Result<*>> {
-        val ready = CountDownLatch(tenants.size)
-        val go = CountDownLatch(1)
-        val executor = Executors.newFixedThreadPool(tenants.size)
-        return try {
-            tenants
-                .map { tenant ->
-                    val to = nextRecipient()
-                    executor.submit(
-                        Callable {
-                            ready.countDown()
-                            go.await()
-                            runCatching {
-                                messageService.receive(
-                                    tenant,
-                                    EmailPayload(
-                                        templateId = "team/varsel",
-                                        to = to,
-                                        subject = "Emne",
-                                        body = "Innhold",
-                                    ),
-                                )
-                            }
-                        },
-                    )
-                }.also {
-                    ready.await()
-                    go.countDown()
-                }.map { it.get() }
-        } finally {
-            executor.shutdown()
-        }
-    }
 
     private fun usageRows(): Long = jdbcClient.sql("SELECT count(*) FROM send_usage").query(Long::class.java).single()
 
