@@ -3,11 +3,8 @@ package no.novari.communication.limit
 import no.novari.communication.message.domain.MessageId
 import no.novari.communication.model.Tenant
 import no.novari.communication.recipient.RecipientHash
-import org.springframework.dao.CannotAcquireLockException
-import org.springframework.jdbc.UncategorizedSQLException
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
-import java.time.Duration
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
@@ -16,27 +13,6 @@ import java.time.ZoneOffset
 class SendUsageRepository(
     private val jdbcClient: JdbcClient,
 ) {
-    fun setLockTimeout(timeout: Duration) {
-        jdbcClient
-            .sql("SELECT set_config('lock_timeout', :timeout, true)")
-            .param("timeout", "${timeout.toMillis()}ms")
-            .query {}
-    }
-
-    fun lockRecipient(recipient: RecipientHash) {
-        acquireLock(jdbcClient.sql("SELECT pg_advisory_xact_lock(:key)").param("key", lockKey(recipient)))
-    }
-
-    // Spring does not translate lock_not_available, so without this a lock timeout would return 500 instead of 503.
-    private fun acquireLock(statement: JdbcClient.StatementSpec) {
-        try {
-            statement.query {}
-        } catch (exception: UncategorizedSQLException) {
-            if (exception.sqlException?.sqlState != LOCK_NOT_AVAILABLE_SQL_STATE) throw exception
-            throw CannotAcquireLockException("Fikk ikke låsen innen lock_timeout", exception)
-        }
-    }
-
     fun recipientSentTimesSince(
         recipient: RecipientHash,
         since: Instant,
@@ -78,11 +54,5 @@ class SendUsageRepository(
             .param("cutoff", cutoff.toOffsetDateTime())
             .update()
 
-    private fun lockKey(recipient: RecipientHash): Long = java.lang.Long.parseUnsignedLong(recipient.value.take(16), 16)
-
     private fun Instant.toOffsetDateTime(): OffsetDateTime = OffsetDateTime.ofInstant(this, ZoneOffset.UTC)
-
-    private companion object {
-        const val LOCK_NOT_AVAILABLE_SQL_STATE = "55P03"
-    }
 }

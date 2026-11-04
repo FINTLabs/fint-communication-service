@@ -110,7 +110,7 @@ C4Component
     Component(handler, "GlobalExceptionHandler", "api.exceptions", "Oversetter feil til ProblemDetail (RFC 9457).")
     Component(loader, "Mal-laster", "template.loading og template.definition", "Leser, kontrollerer og kompilerer maler ved oppstart.")
     Component(service, "MessageService", "message", "Oppretter OutgoingMessage, sjekker grensene og sender den til dispatcheren, i én transaksjon.")
-    Component(limiter, "SendLimiter", "limit", "Grenser per mottaker. Låser mottakeren, teller og registrerer forbruk.")
+    Component(limiter, "SendLimiter", "limit", "Grenser per mottaker. Teller og registrerer forbruk.")
     Component(hasher, "RecipientHasher", "recipient", "HMAC-SHA256 av normalisert adresse.")
     ComponentDb(usage, "send_usage", "Postgres", "Én rad per akseptert melding.")
     Component(dispatcher, "MessageDispatcher", "message.dispatch", "Port for leveranse. I dag LoggingMessageDispatcher, som logger og forkaster.")
@@ -122,7 +122,7 @@ C4Component
     Rel(controller, service, "Mottar melding")
     Rel(service, hasher, "Hasher mottaker")
     Rel(service, limiter, "Sjekker grenser")
-    Rel(limiter, usage, "Låser, teller og skriver", "JDBC")
+    Rel(limiter, usage, "Teller og skriver", "JDBC")
     Rel(service, dispatcher, "Leverer videre")
     Rel(loader, catalog, "Bygger")
     Rel(loader, files, "Leser ved oppstart")
@@ -396,7 +396,6 @@ sequenceDiagram
     MS->>H: hash(to)
     H-->>MS: RecipientHash
     MS->>L: checkAndRecord(message, hash)
-    L->>DB: pg_advisory_xact_lock(hash)
     L->>DB: tidspunkter for mottakeren siste 24 t
     alt Grense overskredet
         L-->>MC: LimitExceededException
@@ -404,7 +403,7 @@ sequenceDiagram
     else Innenfor grensene
         L->>DB: INSERT send_usage
         MS->>D: dispatch(message)
-        MS-->>MC: MessageId (commit, låsen slippes)
+        MS-->>MC: MessageId (commit)
         MC-->>C: 202 Accepted {id}
     end
 ```
@@ -495,7 +494,7 @@ sequenceDiagram
 | 415    | Body er ikke `application/json`.                             | ProblemDetail                                              |
 | 429    | Mottakeren har nådd en grense. Meldingen er ikke lagret.     | ProblemDetail med `limit`, header `Retry-After` i sekunder |
 | 500    | Uventet feil.                                                | Generell melding; stacktracen logges, men returneres ikke. |
-| 503    | Databasen er utilgjengelig eller låsen ble ikke fått på 5 s. | Generell melding. Meldingen er ikke akseptert.             |
+| 503    | Databasen er utilgjengelig.                                  | Generell melding. Meldingen er ikke akseptert.             |
 
 Eksempel på 400:
 
@@ -527,10 +526,8 @@ Retry-After: 3000
 }
 ```
 
-503 gis for `CannotCreateTransactionException`, `DataAccessResourceFailureException` og
-`PessimisticLockingFailureException` (lock timeout; Spring oversetter ikke SQLSTATE `55P03`, så
-`SendUsageRepository` gjør det selv), og for `TransactionSystemException` når
-rollback feilet fordi forbindelsen er brutt. Andre databasefeil er bugs og blir 500.
+503 gis for `CannotCreateTransactionException` og `DataAccessResourceFailureException`, og for
+`TransactionSystemException` når rollback feilet fordi forbindelsen er brutt. Andre databasefeil er bugs og blir 500.
 
 En feil som oppstår i rendering eller domene etter at valideringen har godkjent requesten, er en bug
 og blir 500.
@@ -719,25 +716,21 @@ stopper oppstarten.
 
 `send_usage` har én rad per akseptert melding:
 
-| Kolonne          | Innhold                                                              |
-|------------------|----------------------------------------------------------------------|
-| `message_id`     | Meldings-ID (primærnøkkel).                                          |
-| `recipient_hash` | `RecipientHash`. Global, så alle tenants deler teller.               |
-| `tenant`         | Enum-navnet. Brukes av grensene per tenant (FFS-2334).               |
-| `sent_at`        | Tidspunkt fra `Clock`, lest etter at låsen er tatt (se Samtidighet). |
+| Kolonne          | Innhold                                                |
+|------------------|--------------------------------------------------------|
+| `message_id`     | Meldings-ID (primærnøkkel).                            |
+| `recipient_hash` | `RecipientHash`. Global, så alle tenants deler teller. |
+| `tenant`         | Enum-navnet. Brukes av grensene per tenant (FFS-2334). |
+| `sent_at`        | `receivedAt` for meldingen.                            |
 
-- **Samtidighet.** `DatabaseSendLimiter` tar `pg_advisory_xact_lock` på de første 64 bitene av
-  hashen før den teller. Samtidige meldinger til samme mottaker, også fra flere pods, går dermed
-  etter hverandre. Låsen slippes ved commit eller rollback, og venter høyst 5 sekunder
-  (`lock_timeout`, gir 503). Tidspunktet som brukes til vinduene og lagres i `sent_at`, leses
-  først når låsen er tatt, ikke `receivedAt`. Ellers kunne en forespørsel som ventet på låsen, bli
-  avvist for forbruk som allerede hadde gått ut av vinduet, eller bli registrert for tidlig, slik at
-  neste melding slapp gjennom før det var gått et helt vindu. FFS-2334 tar låser for tenant og totalt i fast rekkefølge etter
-  mottakeren, så det ikke kan oppstå vranglås.
+- **Samtidighet.** Grensene tas uten lås. Samtidige forespørsler til samme mottaker kan alle
+  telle før noen av dem har skrevet, og slippe gjennom noen få meldinger over grensen. Grensene er
+  et sikkerhetsnett mot løkker og feil hos konsumenten, ikke en kvote, så det er godt nok. Skal
+  grensen bli eksakt, må `DatabaseSendLimiter` ta `pg_advisory_xact_lock` før den teller.
 - **Retry-After.** For hvert vindu som er brutt, er neste ledige tidspunkt når raden nummer
   `antall − grense` (eldste først) faller ut av vinduet. Svaret er det seneste av vinduene, i hele
   sekunder rundet opp, minst 1.
-- **Transaksjon.** Lås, telling, registrering og dispatch skjer i samme transaksjon
+- **Transaksjon.** Telling, registrering og dispatch skjer i samme transaksjon
   (`MessageService.receive`). En avvist eller feilet melding etterlater ingen rad.
 - **Opprydning.** `SendUsageCleaner` sletter rader eldre enn 24 timer.
 
@@ -806,7 +799,7 @@ kjører da på hver replika; slettingene er idempotente, så det gjør ingen ska
 | Mottakere lagres som HMAC-SHA256 med hemmelig nøkkel, ikke ren SHA-256.                                             | E-postadresser er lette å gjette; uten nøkkelen kan hashen ikke slås opp mot en liste med adresser.          |
 | Ingen nøkkelrotasjon foreløpig.                                                                                     | Ingen tabeller trenger det ennå; blokkeringslisten (FFS-2336) må ta stilling til det.                        |
 | Opprydning uten ShedLock.                                                                                           | Slettingene er idempotente; samtidige kjøringer på flere replikaer gjør ingen skade.                         |
-| Grenser med `pg_advisory_xact_lock` på mottaker-hashen.                                                             | Atomisk på tvers av pods uten retry-logikk eller egen låsetabell.                                            |
+| Grenser uten lås.                                                                                                   | Kan slippe gjennom noen få meldinger over grensen ved samtidige forespørsler. Enklere kode.                  |
 | Én rad per akseptert melding i `send_usage`, ikke aggregerte bøtter.                                                | Ekte glidende vindu og eksakt `Retry-After`; få rader ved disse volumene.                                    |
 | Forbruk og dispatch i samme transaksjon.                                                                            | En melding som ikke ble akseptert, teller ikke, så klientens nye forsøk straffes ikke.                       |
 | Fail-closed: databasen utilgjengelig gir 503.                                                                       | Grensene kan ikke omgås ved at databasen er nede.                                                            |
