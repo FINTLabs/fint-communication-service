@@ -4,14 +4,12 @@ import io.micrometer.core.instrument.MeterRegistry
 import no.novari.communication.ControllableDispatcher
 import no.novari.communication.IntegrationTest
 import no.novari.communication.MutableClock
-import no.novari.communication.blocklist.RecipientBlockedException
 import no.novari.communication.message.MessageMetrics
 import no.novari.communication.message.MessageService
 import no.novari.communication.message.domain.EmailPayload
 import no.novari.communication.message.domain.MessageId
 import no.novari.communication.model.Tenant
 import no.novari.communication.recipient.RecipientHash
-import no.novari.communication.recipient.RecipientHasher
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.assertj.core.api.Assertions.within
@@ -61,9 +59,6 @@ class LimitMetricsIntegrationTest {
     lateinit var dispatcher: ControllableDispatcher
 
     @Autowired
-    lateinit var hasher: RecipientHasher
-
-    @Autowired
     lateinit var jdbcClient: JdbcClient
 
     @Autowired
@@ -74,7 +69,6 @@ class LimitMetricsIntegrationTest {
     @BeforeEach
     fun setUp() {
         jdbcClient.sql("DELETE FROM send_usage").update()
-        jdbcClient.sql("DELETE FROM recipient_blocklist").update()
         clock.set(START)
     }
 
@@ -130,17 +124,6 @@ class LimitMetricsIntegrationTest {
 
         repeat(2) { send(Tenant.VESTFOLD, ADDRESS) }
         assertThatThrownBy { send(Tenant.VESTFOLD, ADDRESS) }.isInstanceOf(LimitExceededException::class.java)
-
-        jdbcClient
-            .sql(
-                """
-                INSERT INTO recipient_blocklist (recipient_hash, reason, source, expires_at)
-                VALUES (:hash, 'OPT_OUT', 'MANUAL', NULL)
-                """.trimIndent(),
-            ).param("hash", hasher.hash(BLOCKED_ADDRESS).value)
-            .update()
-        assertThatThrownBy { send(Tenant.VESTFOLD, BLOCKED_ADDRESS) }
-            .isInstanceOf(RecipientBlockedException::class.java)
 
         dispatcher.failure = IllegalStateException("dispatch feilet")
         assertThatThrownBy { send(Tenant.VESTFOLD) }.isInstanceOf(IllegalStateException::class.java)
@@ -268,7 +251,6 @@ class LimitMetricsIntegrationTest {
 
     private companion object {
         const val ADDRESS = "metrikk.mottaker@rogfk.no"
-        const val BLOCKED_ADDRESS = "metrikk.avmeldt@rogfk.no"
         val START: Instant = Instant.parse("2026-10-08T08:00:00Z")
     }
 }

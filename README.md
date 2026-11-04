@@ -18,8 +18,7 @@ Se [docs/architecture.md](docs/architecture.md) for arkitektur, dataflyt og sekv
 meldings-ID. Meldingen legges i en kø i databasen og sendes asynkront via leverandøren som er
 konfigurert (se [Utsending](#utsending)). Status for meldingen slås opp med
 `GET /api/v1/messages/{id}` (se [Status for en melding](#status-for-en-melding)). Hver mottaker kan få høyst 10 meldinger per time og 40
-per døgn (se [Grenser](#grenser)), og mottakere som har meldt seg av eller hard-bouncet, avvises
-(se [Blokkeringsliste](#blokkeringsliste)). Amazon SES er klar i koden, men kontoen og domenet
+per døgn (se [Grenser](#grenser)). Amazon SES er klar i koden, men kontoen og domenet
 finnes ikke ennå, så alle miljøer bruker foreløpig leverandøren `logging`, som logger og forkaster
 meldingen. Layout og autentisering kommer i egne oppgaver under
 [FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865).
@@ -196,96 +195,6 @@ Retry-After: 3000
 }
 ```
 
-## Blokkeringsliste
-
-Mottakere som har meldt seg av (`OPT_OUT`) eller hard-bouncet (`HARD_BOUNCE`), får ikke e-post fra
-tjenesten. Listen er felles for alle tenants og sjekkes ved innsending, før grensene.
-
-| Årsak         | Varighet                   | Legges inn av                                                                    |
-|---------------|----------------------------|----------------------------------------------------------------------------------|
-| `OPT_OUT`     | Til den fjernes manuelt.   | [Driftsrutinen](#driftsrutine-for-blokkeringslisten).                            |
-| `HARD_BOUNCE` | 30 dager fra siste bounce. | Driftsrutinen. Senere automatisk fra leveringsrapportene til e-postleverandøren. |
-
-- Mottakeren kjennes igjen på samme måte som for grensene: adressen etter `trim` og små bokstaver.
-- En blokkert mottaker gir `422 Unprocessable Content`. Svaret sier ikke om årsaken er opt-out eller
-  bounce, og gjentar ikke adressen. Meldingen lagres ikke og teller ikke mot grensene.
-- Listen lagrer bare HMAC-hashen av adressen, aldri adressen.
-- En utløpt blokkering gjelder ikke lenger og slettes av den nattlige opprydningen.
-- Er databasen utilgjengelig, avvises meldingen med `503` (fail-closed).
-- Avvisningene telles per tenant (`communication_blocklist_rejected_total`). Mange avvisninger fra
-  samme tenant tyder på en konsument som ikke håndterer `422`; se [Drift og varsling](#drift-og-varsling).
-
-```json
-HTTP/1.1 422
-
-{
-  "title": "Unprocessable Content",
-  "status": 422,
-  "detail": "Mottakeren kan ikke motta e-post fra tjenesten.",
-  "instance": "/api/v1/messages"
-}
-```
-
-### Driftsrutine for blokkeringslisten
-
-Det finnes ingen avmeldingslenke eller admin-API ennå
-([FFS-2340](https://novari-iks.atlassian.net/browse/FFS-2340)). Opt-out legges inn og blokkeringer
-fjernes med SQL mot databasen `fint-common`, etter at hashen av adressen er beregnet.
-
-**1. Beregn hashen i podden.** Nøkkelen ligger allerede i podden, så den forlater aldri clusteret, og
-du trenger ikke tilgang til 1Password-itemet. Imaget har ikke shell, men `kubectl exec` starter `java`
-direkte. Legg adressene i en fil, én per linje, og send filen inn på stdin, så adressene ikke havner i
-shell-historikken eller prosesslisten:
-
-```bash
-kubectl exec -i -n fintlabs-no deploy/fint-communication-service -- java -Xmx64m -cp /app/app.jar -Dloader.main=no.novari.communication.recipient.RecipientHashCliKt org.springframework.boot.loader.launch.PropertiesLauncher < adresser.txt
-```
-
-Utdata er én hash (64 hex-tegn) per adresse, i samme rekkefølge. Blanke linjer hoppes over.
-Verktøyet bruker samme `RecipientHasher` som tjenesten og skriver verken adressen eller nøkkelen.
-`-Xmx64m` hindrer at den ekstra JVM-en tar minne fra tjenesten, som har samme minnegrense (512 Mi).
-Slett filen etterpå.
-
-**2. Kjør SQL** med hashen i stedet for `<hash>`.
-
-Legg til opt-out (gjør ingenting hvis den finnes fra før):
-
-```sql
-INSERT INTO recipient_blocklist (recipient_hash, reason, source, expires_at)
-VALUES ('<hash>', 'OPT_OUT', 'MANUAL', NULL)
-ON CONFLICT (recipient_hash, reason) DO NOTHING;
-```
-
-Legg inn hard bounce manuelt (30 dager; forlenger en eksisterende blokkering, men forkorter den aldri):
-
-```sql
-INSERT INTO recipient_blocklist (recipient_hash, reason, source, expires_at)
-VALUES ('<hash>', 'HARD_BOUNCE', 'MANUAL', now() + interval '30 days')
-ON CONFLICT (recipient_hash, reason)
-DO UPDATE SET expires_at = GREATEST(recipient_blocklist.expires_at, EXCLUDED.expires_at);
-```
-
-Se status:
-
-```sql
-SELECT reason, source, created_at, expires_at FROM recipient_blocklist WHERE recipient_hash = '<hash>';
-```
-
-Fjern opt-out (en aktiv hard bounce står igjen):
-
-```sql
-DELETE FROM recipient_blocklist WHERE recipient_hash = '<hash>' AND reason = 'OPT_OUT';
-```
-
-Fjern all blokkering av mottakeren:
-
-```sql
-DELETE FROM recipient_blocklist WHERE recipient_hash = '<hash>';
-```
-
-Tabellen avviser ugyldige kombinasjoner: `OPT_OUT` kan ikke ha utløp, og `HARD_BOUNCE` må ha det.
-SQL-en over er dekket av `BlocklistIntegrationTest`.
-
 ## Maler
 
 Malene ligger i `app/src/main/resources/templates/<team>/email/<mal>/`, og mal-ID-en er
@@ -428,8 +337,7 @@ en override med bare ett av feltene stopper også oppstarten.
 Nye nøkler lages med `openssl rand -base64 32`. Bytter man krypteringsnøkkelen for køen, kan
 meldinger som ligger i køen, ikke lenger dekrypteres, og de feiler etter siste forsøk. Bytt den
 derfor når køen er tom (`communication_dispatch_queue_size` er 0). Bytter man hashing-nøkkelen, kjenner tjenesten ikke lenger igjen
-mottakere som er lagret fra før. Det gjelder også blokkeringslisten: opt-outs må da registreres på nytt,
-og hard bounces bygges opp igjen først når leverandøren rapporterer dem på nytt. Se
+mottakere som er lagret fra før. Se
 [Mottaker-hashing](docs/architecture.md#mottaker-hashing).
 
 Log-nivået endres uten kodeendring ved å legge en env-variabel i overlayet:
@@ -496,9 +404,7 @@ Jackson 3 (Spring Boot 4) støtter `java.time` uten ekstra modul.
 ### Feil fra tjenesten
 
 Klienten kaster Springs vanlige unntak: `RestClientResponseException` (blokkerende) og
-`WebClientResponseException` (reactive), med ProblemDetail i bodyen. `422` betyr at mottakeren er
-blokkert (se [Blokkeringsliste](#blokkeringsliste)); meldingen bør droppes, siden et nytt forsøk gir
-samme svar. `429` betyr at mottakeren har
+`WebClientResponseException` (reactive), med ProblemDetail i bodyen. `429` betyr at mottakeren har
 nådd en grense (se [Grenser](#grenser)). Meldingen er ikke lagret, og den bør enten droppes eller
 sendes på nytt etter `Retry-After`. Ikke prøv på nytt i en løkke.
 
@@ -531,7 +437,6 @@ av dem har adresse eller hash som tag.
 |-----------------------------------------------|---------------------------------------------------|----------------------------------------------------------|
 | `communication_message_accepted_total`        | `tenant`, `channel`                               | Aksepterte meldinger (`202`).                            |
 | `communication_limit_rejected_total`          | `limit` (`mottaker`, `tenant`, `total`), `tenant` | Meldinger avvist av en grense (`429`).                   |
-| `communication_blocklist_rejected_total`      | `tenant`                                          | Meldinger avvist fordi mottakeren er blokkert (`422`).   |
 | `communication_limit_tenant_usage_ratio`      | `tenant`, `window` (`hour`, `day`)                | Forbruk delt på tenantgrensen, siste time og siste døgn. |
 | `communication_limit_total_usage_ratio`       | `window` (`hour`, `day`)                          | Forbruk delt på totalgrensen, siste time og siste døgn.  |
 | `communication_message_sent_total`            | `tenant`, `channel`                               | Meldinger sendt til leverandøren.                        |
@@ -553,7 +458,6 @@ eksporteres som JSON og legges inn i repoet med PR.
 - utnyttelse av en tenant- eller totalgrense over 80 %,
 - alle avvisninger på tenant- og totalgrensen,
 - over 10 avvisninger på mottakergrensen per tenant per time,
-- over 10 blokkerte innsendinger per tenant per time,
 - meldinger som ikke ble sendt,
 - en melding som har ligget i køen i over 15 minutter.
 

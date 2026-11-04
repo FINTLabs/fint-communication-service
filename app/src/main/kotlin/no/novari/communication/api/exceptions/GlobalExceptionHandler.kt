@@ -4,7 +4,6 @@ import com.fasterxml.jackson.annotation.JsonSubTypes
 import com.fasterxml.jackson.annotation.JsonTypeInfo
 import io.github.oshai.kotlinlogging.KotlinLogging
 import no.novari.communication.api.validation.ValidationError
-import no.novari.communication.blocklist.RecipientBlockedException
 import no.novari.communication.limit.LimitExceededException
 import no.novari.communication.message.MessageNotFoundException
 import no.novari.communication.template.EmailTemplate
@@ -36,15 +35,6 @@ class GlobalExceptionHandler : ResponseEntityExceptionHandler() {
     fun handleRequestValidation(exception: RequestValidationException): ProblemDetail {
         log.warn { "Ugyldig request: ${exception.errors.joinToString { "${it.field} ${it.message}" }}" }
         return badRequest("Requesten inneholder ugyldige felt", exception.errors)
-    }
-
-    @ExceptionHandler(RecipientBlockedException::class)
-    fun handleRecipientBlocked(exception: RecipientBlockedException): ProblemDetail {
-        log.warn { "Mottaker blokkert tenant=${exception.tenant} id=${exception.messageId.value}" }
-        return ProblemDetail.forStatusAndDetail(
-            HttpStatus.UNPROCESSABLE_CONTENT,
-            "Mottakeren kan ikke motta e-post fra tjenesten.",
-        )
     }
 
     @ExceptionHandler(LimitExceededException::class)
