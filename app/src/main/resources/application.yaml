@@ -40,6 +40,16 @@ communication:
       per-hour: 500
       per-day: 2000
     usage-refresh: 60s
+  email:
+    provider: logging
+  dispatch:
+    poll-interval: 2s
+    batch-size: 10
+    lease: 5m
+    max-attempts: 8
+    initial-backoff: 1m
+    max-backoff: 1h
+    queue-metrics-refresh: 60s
   retention:
     metadata: 60d
     cleanup-cron: "0 15 3 * * *"
