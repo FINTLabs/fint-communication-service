@@ -14,6 +14,7 @@ import java.time.Clock
 
 @Service
 class MessageService(
+    private val messageStore: MessageStore,
     private val dispatcher: MessageDispatcher,
     private val recipientHasher: RecipientHasher,
     private val sendLimiter: SendLimiter,
@@ -26,9 +27,13 @@ class MessageService(
         payload: MessagePayload,
     ): MessageId {
         val message = OutgoingMessage.receive(tenant, payload, clock)
-        sendLimiter.checkAndRecord(message, recipientHasher.hash(payload.to))
+        val recipient = recipientHasher.hash(payload.to)
+        sendLimiter.checkAndRecord(message, recipient)
+        messageStore.save(message)
         dispatcher.dispatch(message)
         eventPublisher.publishEvent(MessageAccepted(tenant, payload.channel))
         return message.id
     }
+
+    fun find(id: MessageId): StoredMessage = messageStore.find(id) ?: throw MessageNotFoundException(id)
 }
