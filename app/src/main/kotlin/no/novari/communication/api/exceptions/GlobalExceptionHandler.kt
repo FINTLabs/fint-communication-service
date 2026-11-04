@@ -10,7 +10,6 @@ import no.novari.communication.message.MessageNotFoundException
 import no.novari.communication.template.EmailTemplate
 import org.springframework.beans.TypeMismatchException
 import org.springframework.dao.DataAccessResourceFailureException
-import org.springframework.dao.PessimisticLockingFailureException
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.http.HttpStatusCode
@@ -71,7 +70,6 @@ class GlobalExceptionHandler : ResponseEntityExceptionHandler() {
     @ExceptionHandler(
         CannotCreateTransactionException::class,
         DataAccessResourceFailureException::class,
-        PessimisticLockingFailureException::class,
     )
     fun handleDatabaseUnavailable(exception: Exception): ProblemDetail {
         log.error(exception) { "Databasen er utilgjengelig" }
