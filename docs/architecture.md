@@ -70,7 +70,7 @@ C4Container
 
     Container_Ext(konsumentApp, "Konsument-applikasjon", "Spring Boot 3 eller 4, f.eks. Flyt", "Bygger SendMessageRequest og kaller tjenesten via fint-communication-client.")
     Container(app, "API-applikasjon", "Kotlin, Spring Boot 4, Java 25", "Del av fint-communication-service. REST API, validering, maler og meldingsmottak.")
-    ContainerDb(db, "Database", "PostgreSQL, fint-common", "Del av fint-communication-service. Migreres med Flyway ved oppstart. Forbruk per mottaker (send_usage). Blokkeringsliste og status er planlagt (FFS-2334–2337).")
+    ContainerDb(db, "Database", "PostgreSQL, fint-common", "Del av fint-communication-service. Migreres med Flyway ved oppstart. Forbruk for grensene per mottaker, tenant og totalt (send_usage). Meldingsstatus er planlagt (FFS-2337).")
     ContainerQueue_Ext(kafka, "Kafka", "novari.communication.*", "Sekundær inngang. Planlagt, fase 6.")
     System_Ext(nam, "NAM", "OAuth2. Planlagt.")
     System_Ext(acs, "Azure Communication Services", "E-post. Planlagt.")
@@ -92,10 +92,10 @@ C4Container
 ```
 
 Blå bokser er en del av fint-communication-service, grå er eksterne. Tjenesten består av
-API-applikasjonen og en Postgres-database (`fint-common`). Databasen har tabellen `send_usage` for grensene per mottaker; flere
-tabeller kommer med oppgavene som trenger dem. API-applikasjonen holder ingen
-tilstand i minnet og kan skaleres horisontalt. Malene ligger i applikasjonens classpath og er ikke en
-egen container.
+API-applikasjonen og en Postgres-database (`fint-common`). Databasen har tabellen `send_usage` for
+grensene per mottaker, tenant og totalt; flere tabeller kommer med oppgavene som trenger dem.
+API-applikasjonen holder ingen tilstand i minnet og kan skaleres horisontalt. Malene ligger i
+applikasjonens classpath og er ikke en egen container.
 
 ## C4 nivå 3: Komponenter
 
@@ -110,7 +110,7 @@ C4Component
     Component(handler, "GlobalExceptionHandler", "api.exceptions", "Oversetter feil til ProblemDetail (RFC 9457).")
     Component(loader, "Mal-laster", "template.loading og template.definition", "Leser, kontrollerer og kompilerer maler ved oppstart.")
     Component(service, "MessageService", "message", "Oppretter OutgoingMessage, sjekker grensene og sender den til dispatcheren, i én transaksjon.")
-    Component(limiter, "SendLimiter", "limit", "Grenser per mottaker. Teller og registrerer forbruk.")
+    Component(limiter, "SendLimiter", "limit", "Grenser per mottaker, tenant og totalt. Teller og registrerer forbruk.")
     Component(hasher, "RecipientHasher", "recipient", "HMAC-SHA256 av normalisert adresse.")
     ComponentDb(usage, "send_usage", "Postgres", "Én rad per akseptert melding.")
     Component(dispatcher, "MessageDispatcher", "message.dispatch", "Port for leveranse. I dag LoggingMessageDispatcher, som logger og forkaster.")
@@ -170,21 +170,21 @@ no.novari.communication
     └── loading/         ClasspathEmailTemplateLoader, EmailTemplateConfiguration
 ```
 
-| Pakke                 | Ansvar                                                                                       |
-|-----------------------|----------------------------------------------------------------------------------------------|
-| `api`                 | HTTP-inngangen. Tar imot kontrakten fra `model`, validerer og oversetter til domenet.        |
-| `api.validation`      | Validering av requesten mot reglene og mot malen. Samler opp alle feil.                      |
-| `api.exceptions`      | Oversetter feil til ProblemDetail-responser (RFC 9457).                                      |
-| `limit`               | Grenser for utsending (i dag per mottaker), forbrukstabellen og opprydning av den.           |
-| `message`             | Mottak av meldinger (`MessageService`).                                                      |
-| `message.domain`      | Den interne domenemodellen. Kanal-agnostisk på toppnivå.                                     |
-| `message.dispatch`    | Porten for å levere en akseptert melding videre, og dagens implementasjon av den.            |
-| `recipient`           | Pseudonymisering av mottakere: HMAC-SHA256 av normalisert adresse med hemmelig nøkkel.       |
-| `retention`           | Planlagt opprydning av utløpte rader. Hver tabell registrerer sin egen `ExpiredRowsCleaner`. |
-| `template`            | Ferdig lastede maler og rendering.                                                           |
-| `template.definition` | Lesing og kontroll av malfiler.                                                              |
-| `template.loading`    | Finner malene på classpath og registrerer katalogen som Spring-bean.                         |
-| `config`              | Felles Spring-konfigurasjon (`Clock`).                                                       |
+| Pakke                 | Ansvar                                                                                             |
+|-----------------------|----------------------------------------------------------------------------------------------------|
+| `api`                 | HTTP-inngangen. Tar imot kontrakten fra `model`, validerer og oversetter til domenet.              |
+| `api.validation`      | Validering av requesten mot reglene og mot malen. Samler opp alle feil.                            |
+| `api.exceptions`      | Oversetter feil til ProblemDetail-responser (RFC 9457).                                            |
+| `limit`               | Grenser for utsending (per mottaker, per tenant og totalt), forbrukstabellen og opprydning av den. |
+| `message`             | Mottak av meldinger (`MessageService`).                                                            |
+| `message.domain`      | Den interne domenemodellen. Kanal-agnostisk på toppnivå.                                           |
+| `message.dispatch`    | Porten for å levere en akseptert melding videre, og dagens implementasjon av den.                  |
+| `recipient`           | Pseudonymisering av mottakere: HMAC-SHA256 av normalisert adresse med hemmelig nøkkel.             |
+| `retention`           | Planlagt opprydning av utløpte rader. Hver tabell registrerer sin egen `ExpiredRowsCleaner`.       |
+| `template`            | Ferdig lastede maler og rendering.                                                                 |
+| `template.definition` | Lesing og kontroll av malfiler.                                                                    |
+| `template.loading`    | Finner malene på classpath og registrerer katalogen som Spring-bean.                               |
+| `config`              | Felles Spring-konfigurasjon (`Clock`).                                                             |
 
 Domenet (`message.domain`) avhenger ikke av `api`, `template` eller Spring. Fra `model` bruker
 domenet bare `Tenant`, slik at samme navn brukes i kontrakten, logger og senere i database og
@@ -396,7 +396,7 @@ sequenceDiagram
     MS->>H: hash(to)
     H-->>MS: RecipientHash
     MS->>L: checkAndRecord(message, hash)
-    L->>DB: tidspunkter for mottakeren siste 24 t
+    L->>DB: alle rader i send_usage siste 24 t
     alt Grense overskredet
         L-->>MC: LimitExceededException
         MC-->>C: 429 + Retry-After (transaksjonen rulles tilbake)
@@ -414,9 +414,10 @@ sequenceDiagram
    dermed 400 med en gang, og meldingen er uavhengig av senere endringer i malen.
 3. Svaret 202 betyr at meldingen er akseptert, ikke at den er levert. Leveransen skjer asynkront
    (planlagt i FFS-1968).
-4. Rekkefølgen er validering → blokkeringsliste (planlagt, FFS-2336) → grenser → registrering av
-   forbruk → dispatch → 202. Forbruket registreres bare når alle grenser passerer, og i samme
-   transaksjon som dispatch: feiler dispatch, rulles forbruket tilbake. Se [Grenser](#grenser).
+4. Rekkefølgen er validering → grenser (mottaker → tenant →
+   total) → registrering av forbruk → dispatch → 202. Forbruket registreres bare når alle grenser
+   passerer, og i samme transaksjon som dispatch: feiler dispatch, rulles forbruket tilbake. Se
+   [Grenser](#grenser).
 
 ### Hva skjer med meldingen etter 202
 
@@ -474,7 +475,7 @@ sequenceDiagram
     else Grense overskredet
         MC->>MS: receive(tenant, payload)
         MS->>H: LimitExceededException
-        H-->>C: 429, Retry-After og grensetype
+        H-->>C: 429, Retry-After og grensetype (mottaker, tenant eller total)
     else Databasen utilgjengelig
         MC->>MS: receive(tenant, payload)
         MS->>H: CannotCreateTransactionException o.l.
@@ -485,16 +486,16 @@ sequenceDiagram
     end
 ```
 
-| Status | Når                                                          | Innhold                                                    |
-|--------|--------------------------------------------------------------|------------------------------------------------------------|
-| 202    | Requesten er gyldig og meldingen akseptert.                  | `{"id": "<uuid>"}`                                         |
-| 400    | Ugyldig JSON, feil type eller brudd på valideringsregler.    | `detail` og `errors: [{field, message}]`                   |
-| 401    | Mangler eller ugyldig token. **Planlagt** (FFS-1970).        | ProblemDetail                                              |
-| 405    | Annen HTTP-metode enn POST.                                  | ProblemDetail                                              |
-| 415    | Body er ikke `application/json`.                             | ProblemDetail                                              |
-| 429    | Mottakeren har nådd en grense. Meldingen er ikke lagret.     | ProblemDetail med `limit`, header `Retry-After` i sekunder |
-| 500    | Uventet feil.                                                | Generell melding; stacktracen logges, men returneres ikke. |
-| 503    | Databasen er utilgjengelig.                                  | Generell melding. Meldingen er ikke akseptert.             |
+| Status | Når                                                                            | Innhold                                                    |
+|--------|--------------------------------------------------------------------------------|------------------------------------------------------------|
+| 202    | Requesten er gyldig og meldingen akseptert.                                    | `{"id": "<uuid>"}`                                         |
+| 400    | Ugyldig JSON, feil type eller brudd på valideringsregler.                      | `detail` og `errors: [{field, message}]`                   |
+| 401    | Mangler eller ugyldig token. **Planlagt** (FFS-1970).                          | ProblemDetail                                              |
+| 405    | Annen HTTP-metode enn POST.                                                    | ProblemDetail                                              |
+| 415    | Body er ikke `application/json`.                                               | ProblemDetail                                              |
+| 429    | En grense for mottaker, tenant eller totalt er nådd. Meldingen er ikke lagret. | ProblemDetail med `limit`, header `Retry-After` i sekunder |
+| 500    | Uventet feil.                                                                  | Generell melding; stacktracen logges, men returneres ikke. |
+| 503    | Databasen er utilgjengelig.                                                    | Generell melding. Meldingen er ikke akseptert.             |
 
 Eksempel på 400:
 
@@ -526,8 +527,17 @@ Retry-After: 3000
 }
 ```
 
+`detail` avhenger av grensetypen:
+
+| `limit`    | `detail`                                                    |
+|------------|-------------------------------------------------------------|
+| `mottaker` | Mottakeren har fått for mange meldinger. Prøv igjen senere. |
+| `tenant`   | Tenanten har sendt for mange meldinger. Prøv igjen senere.  |
+| `total`    | Tjenesten har sendt for mange meldinger. Prøv igjen senere. |
+
 503 gis for `CannotCreateTransactionException` og `DataAccessResourceFailureException`, og for
-`TransactionSystemException` når rollback feilet fordi forbindelsen er brutt. Andre databasefeil er bugs og blir 500.
+`TransactionSystemException` når rollback feilet fordi forbindelsen er brutt. Andre databasefeil er
+bugs og blir 500.
 
 En feil som oppstår i rendering eller domene etter at valideringen har godkjent requesten, er en bug
 og blir 500.
@@ -664,18 +674,16 @@ Tjenesten har en egen Postgres-database, `fint-common`, som Flais setter opp fra
 |------------|-------------------------------------------------------------------------------------------------------------------|
 | Tilgang    | Spring Data JDBC. Egen SQL skrives med `JdbcClient`.                                                              |
 | Skjema     | Flyway, `classpath:db/migration`, kjøres ved oppstart. `V1__baseline` er tom.                                     |
-| Tabeller   | `send_usage` (`V2`): forbruk per mottaker for grensene.                                                           |
+| Tabeller   | `send_usage` (`V2`): forbruk for grensene.                                                                        |
 | Readiness  | `db` er med i readiness-gruppen; podden tas ut av trafikk når databasen ikke svarer.                              |
 | Opprydning | `RetentionCleanupJob` kjører kl. 03.15 (Europe/Oslo) og kaller hver `ExpiredRowsCleaner`.                         |
 | Retensjon  | Metadata om meldinger beholdes i 60 dager (`communication.retention.metadata`). `send_usage` beholdes i 24 timer. |
 
 Planlagte tabeller:
 
-| Oppgave  | Innhold                                      |
-|----------|----------------------------------------------|
-| FFS-2334 | Grenser per tenant og totalt i `send_usage`. |
-| FFS-2336 | Blokkeringsliste (hashet mottaker).          |
-| FFS-2337 | `message`-tabellen med status.               |
+| Oppgave  | Innhold                        |
+|----------|--------------------------------|
+| FFS-2337 | `message`-tabellen med status. |
 
 ### Mottaker-hashing
 
@@ -700,19 +708,52 @@ flowchart LR
 
 Hashen kan ikke regnes om uten klartekstadressen, som tjenesten ikke har. Et nøkkelbytte gjør
 derfor alle lagrede hasher ugjenkjennelige. Tellerne (FFS-2333/2334) lever bare i timer eller dager
-og tåler det. Blokkeringslisten (FFS-2336) gjør ikke det, så hvis rotasjon blir aktuelt, må den få
-`key_id` og oppslag med både gammel og ny nøkkel. Dette er et åpent punkt for FFS-2336.
+og tåler det.
 
 ### Grenser
 
-Grensene er et sikkerhetsnett over konsumentenes egne grenser. Verdiene ligger i `application.yaml`
-og endres med PR og deploy. Ugyldige verdier (ikke positive, eller `per-day` lavere enn `per-hour`)
-stopper oppstarten.
+Grensene er et sikkerhetsnett over konsumentenes egne grenser. Grensen per mottaker beskytter
+mottakeren mot spam. Grensene per tenant og totalt skal stoppe en kompromittert eller feilkonfigurert
+avsender og holde kostnaden under kontroll. Verdiene ligger i `application.yaml` og endres med PR og
+deploy.
 
-| Grense       | Konfig                                    | Verdi | Vindu (glidende) |
-|--------------|-------------------------------------------|-------|------------------|
-| Per mottaker | `communication.limits.recipient.per-hour` | 10    | Siste 60 min     |
-| Per mottaker | `communication.limits.recipient.per-day`  | 40    | Siste 24 t       |
+| Grense       | Konfig                                         | Verdi | Vindu (glidende) | Status         |
+|--------------|------------------------------------------------|-------|------------------|----------------|
+| Per mottaker | `communication.limits.recipient.per-hour`      | 10    | Siste 60 min     | Avgjort        |
+| Per mottaker | `communication.limits.recipient.per-day`       | 40    | Siste 24 t       | Avgjort        |
+| Per tenant   | `communication.limits.tenant.default.per-hour` | 100   | Siste 60 min     | Ikke bekreftet |
+| Per tenant   | `communication.limits.tenant.default.per-day`  | 500   | Siste 24 t       | Ikke bekreftet |
+| Totalt       | `communication.limits.total.per-hour`          | 500   | Siste 60 min     | Ikke bekreftet |
+| Totalt       | `communication.limits.total.per-day`           | 2000  | Siste 24 t       | Ikke bekreftet |
+
+Verdiene for tenant og totalt er foreslåtte startverdier uten trafikktall og må bekreftes med
+PO/Flais før produksjon.
+
+En tenant kan få egne grenser under `communication.limits.tenant.overrides.<TENANT>`, der nøkkelen er
+enum-navnet i `Tenant`. Tenanter uten override bruker `default`. I dag har ingen tenant override, heller
+ikke NOVARI (test).
+
+```yaml
+communication:
+  limits:
+    tenant:
+      default:
+        per-hour: 100
+        per-day: 500
+      overrides:
+        ROGALAND:
+          per-hour: 200
+          per-day: 1000
+```
+
+Oppstarten stopper ved ugyldig konfig:
+
+- en grense som ikke er positiv, eller `per-day` lavere enn `per-hour`;
+- en tenantgrense (`default` eller override) som er høyere enn totalgrensen, siden den da aldri ville
+  slått inn;
+- en override for en ukjent tenant, eller med bare ett av `per-hour` og `per-day`.
+
+En tenantgrense lavere enn mottakergrensen er tillatt.
 
 `send_usage` har én rad per akseptert melding:
 
@@ -720,16 +761,26 @@ stopper oppstarten.
 |------------------|--------------------------------------------------------|
 | `message_id`     | Meldings-ID (primærnøkkel).                            |
 | `recipient_hash` | `RecipientHash`. Global, så alle tenants deler teller. |
-| `tenant`         | Enum-navnet. Brukes av grensene per tenant (FFS-2334). |
+| `tenant`         | Enum-navnet. Grensen per tenant teller på denne.       |
 | `sent_at`        | `receivedAt` for meldingen.                            |
 
-- **Samtidighet.** Grensene tas uten lås. Samtidige forespørsler til samme mottaker kan alle
-  telle før noen av dem har skrevet, og slippe gjennom noen få meldinger over grensen. Grensene er
-  et sikkerhetsnett mot løkker og feil hos konsumenten, ikke en kvote, så det er godt nok. Skal
-  grensen bli eksakt, må `DatabaseSendLimiter` ta `pg_advisory_xact_lock` før den teller.
+| Indeks                           | Brukes av                 |
+|----------------------------------|---------------------------|
+| `send_usage_sent_at` (`sent_at`) | Grensene og opprydningen. |
+
+- **Telling.** Alle rader for siste 24 timer hentes med én spørring og filtreres på mottaker og
+  tenant i koden. Det er høyst totalgrensen per døgn med rader, så egne indekserte spørringer per
+  grense ville ikke gitt noe.
+- **Rekkefølge.** Mottaker → tenant → total. Alle tre telles, og forbruket registreres bare når
+  ingen er brutt.
+- **Samtidighet.** Grensene tas uten lås. Samtidige forespørsler kan alle telle før noen av dem
+  har skrevet, og slippe gjennom noen få meldinger over en grense. Grensene er et sikkerhetsnett mot
+  løkker og feil hos konsumenten, ikke en kvote, så det er godt nok. Skal grensene bli eksakte, må
+  `DatabaseSendLimiter` ta `pg_advisory_xact_lock` før den teller.
 - **Retry-After.** For hvert vindu som er brutt, er neste ledige tidspunkt når raden nummer
-  `antall − grense` (eldste først) faller ut av vinduet. Svaret er det seneste av vinduene, i hele
-  sekunder rundet opp, minst 1.
+  `antall − grense` (eldste først) faller ut av vinduet. Er flere grenser brutt, får svaret grensen
+  med lengst ventetid, slik at `limit` og `Retry-After` stemmer overens; ved likhet vinner den første
+  i rekkefølgen. Svaret er i hele sekunder rundet opp, minst 1.
 - **Transaksjon.** Telling, registrering og dispatch skjer i samme transaksjon
   (`MessageService.receive`). En avvist eller feilet melding etterlater ingen rad.
 - **Opprydning.** `SendUsageCleaner` sletter rader eldre enn 24 timer.
@@ -777,29 +828,31 @@ kjører da på hver replika; slettingene er idempotente, så det gjør ingen ska
 | FFS-1969      | Sentral layout rundt rendret innhold, `text/plain`-variant, HTML-regler for maler. |
 | FFS-1970      | Bearer-token fra NAM (Spring Security), 401 som ProblemDetail.                     |
 | FFS-1971      | JSON-logging, korrelasjon-ID, metrics til Prometheus.                              |
-| FFS-2334–2337 | Grenser per tenant og totalt, metrikker, blokkeringsliste og meldingsstatus.       |
+| FFS-2335–2337 | Metrikker og varsling for grenser og meldingsstatus.                               |
 | Fase 6        | Kafka som sekundær inngang, med samme validering og mottak som REST.               |
 
 ## Sentrale beslutninger
 
-| Beslutning                                                                                                          | Begrunnelse                                                                                                  |
-|---------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
-| All e-post sendes via mal; ingen fritekst.                                                                          | Begrenser risikoen for personopplysninger i e-post; alt innhold gjennomgås i PR.                             |
-| Maler er knyttet til kanal (`<team>/<kanal>/<mal>`).                                                                | Formatene er forskjellige per kanal; egne typer per kanal i koden.                                           |
-| Team først i stien.                                                                                                 | Én CODEOWNERS-linje per team.                                                                                |
-| Variabler er strenger; lister er typet med `maxItems` og felt.                                                      | Øvre grense for innhold kan regnes ut; tall og datoer formateres av klienten.                                |
-| `replyTo` defineres i malen, ikke i requesten.                                                                      | Ingen risiko for personlige adresser som svaradresse.                                                        |
-| Polymorf kontrakt (`{tenant, message: {channel, ...}}`) med sealed `Message`.                                       | Nøyaktig én melding følger av typen; nye kanaler er nye subtyper uten brudd i kontrakten.                    |
-| Malen rendres ved mottak.                                                                                           | Feil blir 400 med en gang; meldingen er uavhengig av senere malendringer.                                    |
-| ProblemDetail (RFC 9457) for alle feil.                                                                             | Standardformat, støttet direkte av Spring.                                                                   |
-| JMustache direkte, egen kontroll av taggene.                                                                        | Logic-less maler; reglene kan håndheves ved oppstart.                                                        |
-| Port (`MessageDispatcher`) mellom mottak og leveranse.                                                              | Leveransen kan byttes ut uten å endre API eller service.                                                     |
-| `model` uten avhengigheter ved kjøring (bare `compileOnly` `jackson-annotations`), `client` uten autokonfigurasjon. | Bibliotekene kan brukes i alle Spring Boot 3- og 4-applikasjoner (Jackson 2 og 3).                           |
-| Spring Data JDBC, ikke JPA.                                                                                         | Immutable Kotlin-klasser uten proxies. Tellere (`INSERT … ON CONFLICT`) og opprydning er native SQL uansett. |
-| Mottakere lagres som HMAC-SHA256 med hemmelig nøkkel, ikke ren SHA-256.                                             | E-postadresser er lette å gjette; uten nøkkelen kan hashen ikke slås opp mot en liste med adresser.          |
-| Ingen nøkkelrotasjon foreløpig.                                                                                     | Ingen tabeller trenger det ennå; blokkeringslisten (FFS-2336) må ta stilling til det.                        |
-| Opprydning uten ShedLock.                                                                                           | Slettingene er idempotente; samtidige kjøringer på flere replikaer gjør ingen skade.                         |
-| Grenser uten lås.                                                                                                   | Kan slippe gjennom noen få meldinger over grensen ved samtidige forespørsler. Enklere kode.                  |
-| Én rad per akseptert melding i `send_usage`, ikke aggregerte bøtter.                                                | Ekte glidende vindu og eksakt `Retry-After`; få rader ved disse volumene.                                    |
-| Forbruk og dispatch i samme transaksjon.                                                                            | En melding som ikke ble akseptert, teller ikke, så klientens nye forsøk straffes ikke.                       |
-| Fail-closed: databasen utilgjengelig gir 503.                                                                       | Grensene kan ikke omgås ved at databasen er nede.                                                            |
+| Beslutning                                                                                                          | Begrunnelse                                                                                                            |
+|---------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------|
+| All e-post sendes via mal; ingen fritekst.                                                                          | Begrenser risikoen for personopplysninger i e-post; alt innhold gjennomgås i PR.                                       |
+| Maler er knyttet til kanal (`<team>/<kanal>/<mal>`).                                                                | Formatene er forskjellige per kanal; egne typer per kanal i koden.                                                     |
+| Team først i stien.                                                                                                 | Én CODEOWNERS-linje per team.                                                                                          |
+| Variabler er strenger; lister er typet med `maxItems` og felt.                                                      | Øvre grense for innhold kan regnes ut; tall og datoer formateres av klienten.                                          |
+| `replyTo` defineres i malen, ikke i requesten.                                                                      | Ingen risiko for personlige adresser som svaradresse.                                                                  |
+| Polymorf kontrakt (`{tenant, message: {channel, ...}}`) med sealed `Message`.                                       | Nøyaktig én melding følger av typen; nye kanaler er nye subtyper uten brudd i kontrakten.                              |
+| Malen rendres ved mottak.                                                                                           | Feil blir 400 med en gang; meldingen er uavhengig av senere malendringer.                                              |
+| ProblemDetail (RFC 9457) for alle feil.                                                                             | Standardformat, støttet direkte av Spring.                                                                             |
+| JMustache direkte, egen kontroll av taggene.                                                                        | Logic-less maler; reglene kan håndheves ved oppstart.                                                                  |
+| Port (`MessageDispatcher`) mellom mottak og leveranse.                                                              | Leveransen kan byttes ut uten å endre API eller service.                                                               |
+| `model` uten avhengigheter ved kjøring (bare `compileOnly` `jackson-annotations`), `client` uten autokonfigurasjon. | Bibliotekene kan brukes i alle Spring Boot 3- og 4-applikasjoner (Jackson 2 og 3).                                     |
+| Spring Data JDBC, ikke JPA.                                                                                         | Immutable Kotlin-klasser uten proxies. Tellere (`INSERT … ON CONFLICT`) og opprydning er native SQL uansett.           |
+| Mottakere lagres som HMAC-SHA256 med hemmelig nøkkel, ikke ren SHA-256.                                             | E-postadresser er lette å gjette; uten nøkkelen kan hashen ikke slås opp mot en liste med adresser.                    |
+| Ingen nøkkelrotasjon foreløpig.                                                                                     | Tellerne lever bare i timer eller dager og tåler et nøkkelbytte.                                                       |
+| Opprydning uten ShedLock.                                                                                           | Slettingene er idempotente; samtidige kjøringer på flere replikaer gjør ingen skade.                                   |
+| Grenser uten lås.                                                                                                   | Kan slippe gjennom noen få meldinger over grensen ved samtidige forespørsler. Enklere kode.                            |
+| Én rad per akseptert melding i `send_usage`, ikke aggregerte bøtter.                                                | Ekte glidende vindu og eksakt `Retry-After`; få rader ved disse volumene.                                              |
+| Forbruk og dispatch i samme transaksjon.                                                                            | En melding som ikke ble akseptert, teller ikke, så klientens nye forsøk straffes ikke.                                 |
+| Fail-closed: databasen utilgjengelig gir 503.                                                                       | Grensene kan ikke omgås ved at databasen er nede.                                                                      |
+| Override per tenant må ha både `per-hour` og `per-day`, og ingen tenantgrense kan overstige totalgrensen.           | Ingen fletting med `default` å holde rede på; en tenantgrense over totalen ville aldri slått inn og er trolig en feil. |
+| Ved flere brudde grenser rapporteres den med lengst `Retry-After`.                                                  | Typen og ventetiden stemmer overens, og klienten får ikke ny 429 etter å ha ventet.                                    |
