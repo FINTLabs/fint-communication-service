@@ -421,7 +421,6 @@ sequenceDiagram
         MC-->>C: 422 (transaksjonen rulles tilbake)
     else Ikke blokkert
         MS->>L: checkAndRecord(message, hash)
-        L->>DB: pg_advisory_xact_lock(1, 0)
         L->>DB: alle rader i send_usage siste 24 t
         alt Grense overskredet
             L-->>MC: LimitExceededException
@@ -429,7 +428,7 @@ sequenceDiagram
         else Innenfor grensene
             L->>DB: INSERT send_usage
             MS->>D: dispatch(message)
-            MS-->>MC: MessageId (commit, låsen slippes)
+            MS-->>MC: MessageId (commit)
             MC-->>C: 202 Accepted {id}
         end
     end
@@ -527,7 +526,7 @@ sequenceDiagram
 | 422    | Mottakeren er blokkert (opt-out eller hard bounce). Meldingen er ikke lagret.  | ProblemDetail uten årsak og uten adresse                   |
 | 429    | En grense for mottaker, tenant eller totalt er nådd. Meldingen er ikke lagret. | ProblemDetail med `limit`, header `Retry-After` i sekunder |
 | 500    | Uventet feil.                                                                  | Generell melding; stacktracen logges, men returneres ikke. |
-| 503    | Databasen er utilgjengelig eller låsen ble ikke fått på 5 s.                   | Generell melding. Meldingen er ikke akseptert.             |
+| 503    | Databasen er utilgjengelig.                                                    | Generell melding. Meldingen er ikke akseptert.             |
 
 Eksempel på 400:
 
@@ -581,9 +580,7 @@ blokkert. Et nytt forsøk gir samme svar.
 | `tenant`   | Tenanten har sendt for mange meldinger. Prøv igjen senere.  |
 | `total`    | Tjenesten har sendt for mange meldinger. Prøv igjen senere. |
 
-503 gis for `CannotCreateTransactionException`, `DataAccessResourceFailureException` og
-`PessimisticLockingFailureException` (lock timeout; `SendUsageRepository` oversetter Postgres'
-`lock_not_available` til `CannotAcquireLockException`, siden Spring ikke gjør det selv), og for
+503 gis for `CannotCreateTransactionException` og `DataAccessResourceFailureException`, og for
 `TransactionSystemException` når rollback feilet fordi forbindelsen er brutt. Andre databasefeil er
 bugs og blir 500.
 
@@ -809,12 +806,12 @@ En tenantgrense lavere enn mottakergrensen er tillatt.
 
 `send_usage` har én rad per akseptert melding:
 
-| Kolonne          | Innhold                                                              |
-|------------------|----------------------------------------------------------------------|
-| `message_id`     | Meldings-ID (primærnøkkel).                                          |
-| `recipient_hash` | `RecipientHash`. Global, så alle tenants deler teller.               |
-| `tenant`         | Enum-navnet. Grensen per tenant teller på denne.                     |
-| `sent_at`        | Tidspunkt fra `Clock`, lest etter at låsen er tatt (se Samtidighet). |
+| Kolonne          | Innhold                                                |
+|------------------|--------------------------------------------------------|
+| `message_id`     | Meldings-ID (primærnøkkel).                            |
+| `recipient_hash` | `RecipientHash`. Global, så alle tenants deler teller. |
+| `tenant`         | Enum-navnet. Grensen per tenant teller på denne.       |
+| `sent_at`        | `receivedAt` for meldingen.                            |
 
 | Indeks                           | Brukes av                 |
 |----------------------------------|---------------------------|
@@ -825,19 +822,15 @@ En tenantgrense lavere enn mottakergrensen er tillatt.
   grense ville ikke gitt noe.
 - **Rekkefølge.** Mottaker → tenant → total. Alle tre telles, og forbruket registreres bare når
   ingen er brutt.
-- **Samtidighet.** `DatabaseSendLimiter` tar en global lås (`pg_advisory_xact_lock(1, 0)`). Den gjør
-  at alle innsendinger, også fra flere pods, går etter hverandre, og dekker dermed alle tre grensene;
-  egne låser per mottaker eller tenant ville ikke gitt noe ekstra. Ved noen hundre meldinger i timen
-  og en kort transaksjon koster det ingenting. Låsen slippes ved commit eller
-  rollback, og venter høyst 5 sekunder (`lock_timeout`, gir 503). Tidspunktet som brukes til
-  vinduene og lagres i `sent_at`, leses først når låsen er tatt, ikke `receivedAt`. Ellers kunne en
-  forespørsel som ventet på låsen, bli avvist for forbruk som allerede hadde gått ut av vinduet,
-  eller bli registrert for tidlig, slik at neste melding slapp gjennom før det var gått et helt vindu.
+- **Samtidighet.** Grensene tas uten lås. Samtidige forespørsler kan alle telle før noen av dem
+  har skrevet, og slippe gjennom noen få meldinger over en grense. Grensene er et sikkerhetsnett mot
+  løkker og feil hos konsumenten, ikke en kvote, så det er godt nok. Skal grensene bli eksakte, må
+  `DatabaseSendLimiter` ta `pg_advisory_xact_lock` før den teller.
 - **Retry-After.** For hvert vindu som er brutt, er neste ledige tidspunkt når raden nummer
   `antall − grense` (eldste først) faller ut av vinduet. Er flere grenser brutt, får svaret grensen
   med lengst ventetid, slik at `limit` og `Retry-After` stemmer overens; ved likhet vinner den første
   i rekkefølgen. Svaret er i hele sekunder rundet opp, minst 1.
-- **Transaksjon.** Låser, telling, registrering og dispatch skjer i samme transaksjon
+- **Transaksjon.** Telling, registrering og dispatch skjer i samme transaksjon
   (`MessageService.receive`). En avvist eller feilet melding etterlater ingen rad.
 - **Opprydning.** `SendUsageCleaner` sletter rader eldre enn 24 timer.
 
@@ -873,7 +866,7 @@ Listen er global (på tvers av tenants) og lagrer bare `RecipientHash`.
   ny verdi, så en blokkering forlenges, men aldri forkortes.
 - **Oppslag.** `DatabaseRecipientBlocklist` spør om det finnes en rad for hashen med
   `expires_at IS NULL` eller `expires_at > now`, der `now` er mottakstidspunktet fra `Clock`. Utløpte
-  rader ignoreres. Oppslaget skjer i transaksjonen til `MessageService.receive`, før grenselåsen.
+  rader ignoreres. Oppslaget skjer i transaksjonen til `MessageService.receive`, før grensene.
 - **Avvisning.** Blokkert gir `RecipientBlockedException` og `422`. Transaksjonen rulles tilbake, så
   meldingen verken lagres eller teller mot grensene. Svaret og loggen har ikke årsaken.
 - **Metrikk.** Telleren `communication.blocklist.rejected` øker for hver avvisning, med `tenant` som
@@ -988,7 +981,7 @@ kjører da på hver replika; slettingene er idempotente, så det gjør ingen ska
 | Mottakere lagres som HMAC-SHA256 med hemmelig nøkkel, ikke ren SHA-256.                                             | E-postadresser er lette å gjette; uten nøkkelen kan hashen ikke slås opp mot en liste med adresser.                                                            |
 | Ingen nøkkelrotasjon og ingen `key_id` i blokkeringslisten.                                                         | Et nøkkelbytte krever at blokkeringslisten bygges opp på nytt. `key_id` alene hjelper ikke uten oppslag med flere nøkler, og kan legges til med en migrering.  |
 | Opprydning uten ShedLock.                                                                                           | Slettingene er idempotente; samtidige kjøringer på flere replikaer gjør ingen skade.                                                                           |
-| Grenser med én global `pg_advisory_xact_lock`, ingen lås per mottaker eller tenant.                                 | Atomisk på tvers av pods uten retry-logikk eller egen låsetabell; ved noen hundre meldinger i timen koster serialiseringen ingenting.                          |
+| Grenser uten lås.                                                                                                   | Kan slippe gjennom noen få meldinger over grensen ved samtidige forespørsler. Enklere kode.                                                                    |
 | Én rad per akseptert melding i `send_usage`, ikke aggregerte bøtter.                                                | Ekte glidende vindu og eksakt `Retry-After`; få rader ved disse volumene.                                                                                      |
 | Forbruk og dispatch i samme transaksjon.                                                                            | En melding som ikke ble akseptert, teller ikke, så klientens nye forsøk straffes ikke.                                                                         |
 | Fail-closed: databasen utilgjengelig gir 503.                                                                       | Grensene kan ikke omgås ved at databasen er nede.                                                                                                              |
