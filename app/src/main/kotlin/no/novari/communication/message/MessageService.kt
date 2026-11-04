@@ -7,6 +7,7 @@ import no.novari.communication.message.domain.MessagePayload
 import no.novari.communication.message.domain.OutgoingMessage
 import no.novari.communication.model.Tenant
 import no.novari.communication.recipient.RecipientHasher
+import org.springframework.context.ApplicationEventPublisher
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Clock
@@ -16,6 +17,7 @@ class MessageService(
     private val dispatcher: MessageDispatcher,
     private val recipientHasher: RecipientHasher,
     private val sendLimiter: SendLimiter,
+    private val eventPublisher: ApplicationEventPublisher,
     private val clock: Clock,
 ) {
     @Transactional
@@ -26,6 +28,7 @@ class MessageService(
         val message = OutgoingMessage.receive(tenant, payload, clock)
         sendLimiter.checkAndRecord(message, recipientHasher.hash(payload.to))
         dispatcher.dispatch(message)
+        eventPublisher.publishEvent(MessageAccepted(tenant, payload.channel))
         return message.id
     }
 }
