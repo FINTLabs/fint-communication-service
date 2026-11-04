@@ -1,0 +1,172 @@
+package no.novari.communication.email.report
+
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import no.novari.communication.message.MessageStore
+import no.novari.communication.message.StoredMessage
+import no.novari.communication.message.domain.MessageChannel
+import no.novari.communication.message.domain.MessageId
+import no.novari.communication.message.domain.OutgoingMessage
+import no.novari.communication.model.FailureReason
+import no.novari.communication.model.MessageStatus
+import no.novari.communication.model.Tenant
+import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Test
+import org.springframework.dao.DataAccessResourceFailureException
+import org.springframework.transaction.support.TransactionOperations
+import tools.jackson.databind.json.JsonMapper
+import java.time.Clock
+import java.time.Duration
+import java.time.Instant
+
+class DeliveryReportPollerTest {
+    private val queue = InMemoryQueue()
+    private val store = FakeMessageStore()
+    private val meterRegistry = SimpleMeterRegistry()
+    private val poller =
+        DeliveryReportPoller(
+            queue = queue,
+            parser = DeliveryReportParser(JsonMapper.builder().build()),
+            processor =
+                DeliveryReportProcessor(
+                    messageStore = store,
+                    transactions = TransactionOperations.withoutTransaction(),
+                    clock = Clock.systemUTC(),
+                ),
+            metrics = DeliveryReportMetrics(meterRegistry),
+        )
+
+    @Test
+    fun `a report that cannot be stored stays in the queue`() {
+        val message = store.add()
+        store.failure = DataAccessResourceFailureException("databasen er nede")
+        queue.add(DeliveryReportEvents.sesEvent(message.id, "Delivery"))
+
+        poller.poll()
+
+        assertThat(queue.messages).hasSize(1)
+        assertThat(meterRegistry.find(DeliveryReportMetrics.RECEIVED_METRIC).counters()).isEmpty()
+    }
+
+    @Test
+    fun `a report that has been received too many times is discarded as poison`() {
+        val message = store.add()
+        queue.add(
+            DeliveryReportEvents.sesEvent(message.id, "Delivery"),
+            receiveCount =
+                DeliveryReportPoller.MAX_RECEIVE_COUNT + 1L,
+        )
+
+        poller.poll()
+
+        assertThat(queue.messages).isEmpty()
+        assertThat(store.applied).isEmpty()
+        assertThat(discarded(DiscardReason.POISON)).isEqualTo(1.0)
+    }
+
+    @Test
+    fun `an unavailable queue is counted and does not throw`() {
+        queue.failure = IllegalStateException("køen svarer ikke")
+
+        poller.poll()
+
+        assertThat(meterRegistry.counter(DeliveryReportMetrics.POLL_FAILED_METRIC).count()).isEqualTo(1.0)
+    }
+
+    @Test
+    fun `a failed delete is counted and does not throw`() {
+        val message = store.add()
+        queue.add(DeliveryReportEvents.sesEvent(message.id, "Delivery"))
+        queue.deleteFailure = IllegalStateException("køen svarer ikke")
+
+        poller.poll()
+
+        assertThat(store.applied).hasSize(1)
+        assertThat(meterRegistry.counter(DeliveryReportMetrics.POLL_FAILED_METRIC).count()).isEqualTo(1.0)
+    }
+
+    private fun received(status: String): Double =
+        meterRegistry
+            .find(DeliveryReportMetrics.RECEIVED_METRIC)
+            .tag("status", status)
+            .counter()
+            ?.count() ?: 0.0
+
+    private fun discarded(reason: DiscardReason): Double =
+        meterRegistry
+            .find(DeliveryReportMetrics.DISCARDED_METRIC)
+            .tag("reason", reason.value)
+            .counter()
+            ?.count() ?: 0.0
+
+    private class InMemoryQueue : DeliveryReportQueue {
+        val messages = mutableListOf<QueuedReport>()
+        var failure: RuntimeException? = null
+        var deleteFailure: RuntimeException? = null
+
+        fun add(
+            body: String,
+            receiveCount: Long = 1,
+        ) {
+            messages += QueuedReport("${messages.size}", "kvittering", receiveCount, body.toByteArray())
+        }
+
+        override fun receive(
+            maxMessages: Int,
+            visibilityTimeout: Duration,
+        ): List<QueuedReport> {
+            failure?.let { throw it }
+            return messages.take(maxMessages)
+        }
+
+        override fun delete(report: QueuedReport) {
+            deleteFailure?.let { throw it }
+            messages.remove(report)
+        }
+    }
+
+    private class FakeMessageStore : MessageStore {
+        val messages = mutableMapOf<MessageId, StoredMessage>()
+        val applied = mutableListOf<Pair<MessageId, MessageStatus>>()
+        var failure: RuntimeException? = null
+
+        fun add(): StoredMessage {
+            val now = Instant.now()
+            val message =
+                StoredMessage(
+                    MessageId.generate(),
+                    Tenant.ROGALAND,
+                    MessageChannel.EMAIL,
+                    "team/varsel",
+                    MessageStatus.SENT,
+                    null,
+                    now,
+                    now,
+                )
+            messages[message.id] = message
+            return message
+        }
+
+        override fun save(message: OutgoingMessage) = throw UnsupportedOperationException()
+
+        override fun find(id: MessageId): StoredMessage? = messages[id]
+
+        override fun complete(
+            id: MessageId,
+            status: MessageStatus,
+            failureReason: FailureReason?,
+            at: Instant,
+        ) = throw UnsupportedOperationException()
+
+        override fun applyReport(
+            id: MessageId,
+            status: MessageStatus,
+            failureReason: FailureReason?,
+            at: Instant,
+        ) {
+            failure?.let { throw it }
+            val message = messages[id] ?: return
+            applied += id to status
+            messages[id] = message.copy(status = status, failureReason = failureReason, updatedAt = at)
+        }
+    }
+}
