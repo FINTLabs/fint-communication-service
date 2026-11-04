@@ -1,7 +1,7 @@
-# Runbook: grenser, blokkerte innsendinger og utsending
+# Runbook: grenser og utsending
 
-Runbooken beskriver hva vakthavende gjør når et varsel for fint-communication-service går. Grensene og
-blokkeringslisten er beskrevet i [README](../README.md#grenser) og
+Runbooken beskriver hva vakthavende gjør når et varsel for fint-communication-service går. Grensene er
+beskrevet i [README](../README.md#grenser) og
 [arkitekturdokumentet](architecture.md#grenser), og utsendingen i [README](../README.md#utsending) og
 [arkitekturdokumentet](architecture.md#hva-skjer-med-meldingen-etter-202).
 
@@ -14,26 +14,24 @@ blokkeringslisten er beskrevet i [README](../README.md#grenser) og
 5. [Tenantgrense nådd](#tenantgrense-nådd)
 6. [Totalgrense nådd](#totalgrense-nådd)
 7. [Mange mottaker-429](#mange-mottaker-429)
-8. [Mange blokkerte innsendinger](#mange-blokkerte-innsendinger)
-9. [Meldinger feilet](#meldinger-feilet)
-10. [Køen står](#køen-står)
-11. [Justere grenser](#justere-grenser)
-12. [Testvarsel](#testvarsel)
+8. [Meldinger feilet](#meldinger-feilet)
+9. [Køen står](#køen-står)
+10. [Justere grenser](#justere-grenser)
+11. [Testvarsel](#testvarsel)
 
 ## Metrikker
 
-| Metrikk (Prometheus)                          | Type    | Tagger                                                                                                     | Betydning                                              |
-|-----------------------------------------------|---------|------------------------------------------------------------------------------------------------------------|--------------------------------------------------------|
-| `communication_limit_rejected_total`          | Counter | `limit` (`mottaker`, `tenant`, `total`), `tenant`                                                          | Meldinger avvist med 429.                              |
-| `communication_blocklist_rejected_total`      | Counter | `tenant`                                                                                                   | Meldinger avvist med 422 fordi mottakeren er blokkert. |
-| `communication_message_accepted_total`        | Counter | `tenant`, `channel`                                                                                        | Meldinger akseptert med 202.                           |
-| `communication_limit_tenant_usage_ratio`      | Gauge   | `tenant`, `window` (`hour`, `day`)                                                                         | Forbruk delt på tenantens grense i glidende vindu.     |
-| `communication_limit_total_usage_ratio`       | Gauge   | `window` (`hour`, `day`)                                                                                   | Forbruk delt på totalgrensen i glidende vindu.         |
-| `communication_message_sent_total`            | Counter | `tenant`, `channel`                                                                                        | Meldinger sendt til leverandøren.                      |
-| `communication_message_retried_total`         | Counter | `tenant`, `channel`, `reason` (`timeout`, `throttled`, `server-error`, `unauthorized`, `io`, `unexpected`) | Forbigående feil; meldingen prøves igjen.              |
-| `communication_message_failed_total`          | Counter | `tenant`, `channel`, `reason` (`rejected`, `retries-exhausted`)                                            | Meldinger som ikke ble sendt.                          |
-| `communication_dispatch_queue_size`           | Gauge   | –                                                                                                          | Meldinger i køen (ikke sendt eller feilet ennå).       |
-| `communication_dispatch_queue_oldest_seconds` | Gauge   | –                                                                                                          | Alderen på den eldste meldingen i køen.                |
+| Metrikk (Prometheus)                          | Type    | Tagger                                                                                                     | Betydning                                          |
+|-----------------------------------------------|---------|------------------------------------------------------------------------------------------------------------|----------------------------------------------------|
+| `communication_limit_rejected_total`          | Counter | `limit` (`mottaker`, `tenant`, `total`), `tenant`                                                          | Meldinger avvist med 429.                          |
+| `communication_message_accepted_total`        | Counter | `tenant`, `channel`                                                                                        | Meldinger akseptert med 202.                       |
+| `communication_limit_tenant_usage_ratio`      | Gauge   | `tenant`, `window` (`hour`, `day`)                                                                         | Forbruk delt på tenantens grense i glidende vindu. |
+| `communication_limit_total_usage_ratio`       | Gauge   | `window` (`hour`, `day`)                                                                                   | Forbruk delt på totalgrensen i glidende vindu.     |
+| `communication_message_sent_total`            | Counter | `tenant`, `channel`                                                                                        | Meldinger sendt til leverandøren.                  |
+| `communication_message_retried_total`         | Counter | `tenant`, `channel`, `reason` (`timeout`, `throttled`, `server-error`, `unauthorized`, `io`, `unexpected`) | Forbigående feil; meldingen prøves igjen.          |
+| `communication_message_failed_total`          | Counter | `tenant`, `channel`, `reason` (`rejected`, `retries-exhausted`)                                            | Meldinger som ikke ble sendt.                      |
+| `communication_dispatch_queue_size`           | Gauge   | –                                                                                                          | Meldinger i køen (ikke sendt eller feilet ennå).   |
+| `communication_dispatch_queue_oldest_seconds` | Gauge   | –                                                                                                          | Alderen på den eldste meldingen i køen.            |
 
 Utnyttelsen regnes ut fra `send_usage` hvert minutt (`communication.limits.usage-refresh`), og kø-metrikkene
 fra `dispatch_queue` hvert minutt (`communication.dispatch.queue-metrics-refresh`), så de kan ligge opptil ett
@@ -48,16 +46,15 @@ Varslene registreres manuelt i Grafana Alerts med metrikkene, tersklene og varig
 Tabellen er kilden: endres en regel i Grafana, oppdateres den her også.
 `$app` står for `app="fint-communication-service"`.
 
-| Varsel                       | Uttrykk                                                                                           | I minst | Alvorlighet |
-|------------------------------|---------------------------------------------------------------------------------------------------|---------|-------------|
-| Høy utnyttelse, tenant       | `max by (tenant, window) (communication_limit_tenant_usage_ratio{$app}) > 0.8`                    | 5m      | warning     |
-| Høy utnyttelse, total        | `max by (window) (communication_limit_total_usage_ratio{$app}) > 0.8`                             | 5m      | warning     |
-| Tenantgrense nådd            | `sum by (tenant) (increase(communication_limit_rejected_total{$app, limit="tenant"}[5m])) > 0`    | –       | warning     |
-| Totalgrense nådd             | `sum (increase(communication_limit_rejected_total{$app, limit="total"}[5m])) > 0`                 | –       | critical    |
-| Mange mottaker-429           | `sum by (tenant) (increase(communication_limit_rejected_total{$app, limit="mottaker"}[1h])) > 10` | –       | warning     |
-| Mange blokkerte innsendinger | `sum by (tenant) (increase(communication_blocklist_rejected_total{$app}[1h])) > 10`               | –       | warning     |
-| Meldinger feilet             | `sum by (tenant, reason) (increase(communication_message_failed_total{$app}[15m])) > 0`           | –       | warning     |
-| Køen står                    | `max(communication_dispatch_queue_oldest_seconds{$app}) > 900`                                    | 5m      | critical    |
+| Varsel                 | Uttrykk                                                                                           | I minst | Alvorlighet |
+|------------------------|---------------------------------------------------------------------------------------------------|---------|-------------|
+| Høy utnyttelse, tenant | `max by (tenant, window) (communication_limit_tenant_usage_ratio{$app}) > 0.8`                    | 5m      | warning     |
+| Høy utnyttelse, total  | `max by (window) (communication_limit_total_usage_ratio{$app}) > 0.8`                             | 5m      | warning     |
+| Tenantgrense nådd      | `sum by (tenant) (increase(communication_limit_rejected_total{$app, limit="tenant"}[5m])) > 0`    | –       | warning     |
+| Totalgrense nådd       | `sum (increase(communication_limit_rejected_total{$app, limit="total"}[5m])) > 0`                 | –       | critical    |
+| Mange mottaker-429     | `sum by (tenant) (increase(communication_limit_rejected_total{$app, limit="mottaker"}[1h])) > 10` | –       | warning     |
+| Meldinger feilet       | `sum by (tenant, reason) (increase(communication_message_failed_total{$app}[15m])) > 0`           | –       | warning     |
+| Køen står              | `max(communication_dispatch_queue_oldest_seconds{$app}) > 900`                                    | 5m      | critical    |
 
 Alle avvisninger på tenant- og totalgrensen varsles, siden de betyr at meldinger ikke blir sendt. Det
 samme gjelder alle meldinger som feiler etter `202`, siden konsumenten ikke får vite om det (meldingsstatus
@@ -74,8 +71,6 @@ samme person), så de varsles først over 10 per time per tenant.
    ```logql
    {namespace="fintlabs-no", app="fint-communication-service"} |= "Grense overskredet" | json | line_format "{{.message}}"
    ```
-
-   For blokkerte innsendinger søker du etter `Mottaker blokkert`.
 3. Se forbruket per tenant og time direkte i databasen `fint-common` (bare siste døgn finnes):
 
    ```sql
@@ -138,20 +133,6 @@ oppsummering, eller som ignorerer `429` og prøver igjen uten å vente.
 
 **Gjør:** kontakt teamet som eier konsumenten. Mottakergrensen økes ikke uten at fylket eller
 mottakeren uttrykkelig har gitt tillatelse.
-
-## Mange blokkerte innsendinger
-
-**Betyr:** over 10 meldinger per time fra en tenant er avvist med `422` fordi mottakeren har meldt
-seg av eller hard-bouncet.
-
-**Sannsynlige årsaker:** konsumenten håndterer ikke `422` og fortsetter å sende til samme mottaker,
-eller en mottakerliste har mange døde adresser.
-
-**Gjør:**
-
-- Kontakt teamet som eier konsumenten. `422` betyr at et nytt forsøk ikke hjelper.
-- Hvis en mottaker er blokkert ved en feil, fjernes blokkeringen med
-  [driftsrutinen for blokkeringslisten](../README.md#driftsrutine-for-blokkeringslisten).
 
 ## Meldinger feilet
 

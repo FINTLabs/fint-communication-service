@@ -1,7 +1,6 @@
 package no.novari.communication.message
 
 import no.novari.communication.TEST_RECIPIENT_HASHING_KEY
-import no.novari.communication.blocklist.RecipientBlockedException
 import no.novari.communication.limit.LimitExceededException
 import no.novari.communication.limit.LimitType
 import no.novari.communication.message.domain.EmailPayload
@@ -27,14 +26,10 @@ class MessageServiceTest {
     private val limited = mutableListOf<Pair<OutgoingMessage, RecipientHash>>()
     private val events = mutableListOf<Any>()
     private var limitExceeded = false
-    private var blocked = false
     private val service =
         MessageService(
             dispatcher = dispatched::add,
             recipientHasher = hasher,
-            recipientBlocklist = { message, _ ->
-                if (blocked) throw RecipientBlockedException(message.tenant, message.id)
-            },
             sendLimiter = { message, recipient ->
                 if (limitExceeded) {
                     throw LimitExceededException(LimitType.RECIPIENT, message.tenant, message.id, Duration.ofMinutes(1))
@@ -78,16 +73,6 @@ class MessageServiceTest {
     }
 
     @Test
-    fun `a blocked recipient is neither counted nor dispatched`() {
-        blocked = true
-
-        assertThatThrownBy { service.receive(Tenant.ROGALAND, payload) }
-            .isInstanceOf(RecipientBlockedException::class.java)
-        assertThat(limited).isEmpty()
-        assertThat(dispatched).isEmpty()
-    }
-
-    @Test
     fun `an accepted message is published with tenant and channel`() {
         service.receive(Tenant.ROGALAND, payload)
 
@@ -97,9 +82,6 @@ class MessageServiceTest {
     @Test
     fun `a rejected or failed message is not published as accepted`() {
         limitExceeded = true
-        assertThatThrownBy { service.receive(Tenant.ROGALAND, payload) }
-        limitExceeded = false
-        blocked = true
         assertThatThrownBy { service.receive(Tenant.ROGALAND, payload) }
 
         assertThat(events).isEmpty()

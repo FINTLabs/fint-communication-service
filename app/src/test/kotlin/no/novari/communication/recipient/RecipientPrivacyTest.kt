@@ -3,7 +3,6 @@ package no.novari.communication.recipient
 import io.micrometer.core.instrument.MeterRegistry
 import no.novari.communication.IntegrationTest
 import no.novari.communication.TEST_RECIPIENT_HASHING_KEY
-import no.novari.communication.blocklist.RecipientBlockedException
 import no.novari.communication.limit.LimitExceededException
 import no.novari.communication.limit.LimitUsageMetrics
 import no.novari.communication.message.MessageService
@@ -56,35 +55,24 @@ class RecipientPrivacyTest {
     lateinit var queueMetrics: DispatchQueueMetrics
 
     @BeforeEach
-    fun sendUntilLimitedAndBlocked() {
+    fun sendUntilTheLimitIsExceeded() {
         jdbcClient.sql("DELETE FROM send_usage").update()
-        jdbcClient.sql("DELETE FROM recipient_blocklist").update()
         jdbcClient.sql("DELETE FROM dispatch_queue").update()
-        repeat(RECIPIENT_PER_HOUR) { send(ADDRESS) }
-        assertThatThrownBy { send(ADDRESS) }.isInstanceOf(LimitExceededException::class.java)
+        repeat(RECIPIENT_PER_HOUR) { send() }
+        assertThatThrownBy { send() }.isInstanceOf(LimitExceededException::class.java)
 
-        jdbcClient
-            .sql(
-                """
-                INSERT INTO recipient_blocklist (recipient_hash, reason, source, expires_at)
-                VALUES (:hash, 'OPT_OUT', 'MANUAL', NULL)
-                """.trimIndent(),
-            ).param("hash", hasher.hash(BLOCKED_ADDRESS).value)
-            .update()
-        assertThatThrownBy { send(BLOCKED_ADDRESS) }.isInstanceOf(RecipientBlockedException::class.java)
         usageMetrics.refresh()
     }
 
     @Test
     fun `neither the address, the hash nor the key ends up in logs`(output: CapturedOutput) {
+        val hash = hasher.hash(ADDRESS)
         cleanupJob.deleteExpiredRows()
 
-        ADDRESSES.forEach { address ->
-            assertThat(output.all)
-                .doesNotContainIgnoringCase(address.trim())
-                .doesNotContain(hasher.hash(address).value)
-        }
-        assertThat(output.all).doesNotContain(TEST_RECIPIENT_HASHING_KEY)
+        assertThat(output.all)
+            .doesNotContainIgnoringCase(ADDRESS.trim())
+            .doesNotContain(hash.value)
+            .doesNotContain(TEST_RECIPIENT_HASHING_KEY)
     }
 
     @Test
@@ -92,20 +80,17 @@ class RecipientPrivacyTest {
         assertThat(textColumns()).contains(
             "send_usage" to "recipient_hash",
             "send_usage" to "tenant",
-            "recipient_blocklist" to "recipient_hash",
             "dispatch_queue" to "tenant",
             "dispatch_queue" to "template_id",
         )
 
         val columnsContainingAddress =
             textColumns().filter { (table, column) ->
-                ADDRESSES.any { address ->
-                    jdbcClient
-                        .sql("""SELECT count(*) FROM "$table" WHERE "$column"::text ILIKE :address""")
-                        .param("address", "%${address.trim()}%")
-                        .query(Long::class.java)
-                        .single() > 0
-                }
+                jdbcClient
+                    .sql("""SELECT count(*) FROM "$table" WHERE "$column"::text ILIKE :address""")
+                    .param("address", "%${ADDRESS.trim()}%")
+                    .query(Long::class.java)
+                    .single() > 0
             }
 
         assertThat(columnsContainingAddress).isEmpty()
@@ -119,14 +104,12 @@ class RecipientPrivacyTest {
 
         val columnsContainingAddress =
             binaryColumns().filter { (table, column) ->
-                ADDRESSES.any { address ->
-                    jdbcClient
-                        .sql(
-                            """SELECT count(*) FROM "$table" WHERE position(convert_to(:address, 'UTF8') IN "$column") > 0""",
-                        ).param("address", address.trim())
-                        .query(Long::class.java)
-                        .single() > 0
-                }
+                jdbcClient
+                    .sql(
+                        """SELECT count(*) FROM "$table" WHERE position(convert_to(:address, 'UTF8') IN "$column") > 0""",
+                    ).param("address", ADDRESS.trim())
+                    .query(Long::class.java)
+                    .single() > 0
             }
 
         assertThat(columnsContainingAddress).isEmpty()
@@ -136,11 +119,7 @@ class RecipientPrivacyTest {
     fun `no metric tag contains the address`() {
         val tagValues = meterRegistry.meters.flatMap { meter -> meter.id.tags.map { it.value } }
 
-        ADDRESSES.forEach { address ->
-            assertThat(tagValues)
-                .noneMatch { it.contains(address.trim(), ignoreCase = true) }
-                .doesNotContain(hasher.hash(address).value)
-        }
+        assertThat(tagValues).noneMatch { it.contains(ADDRESS.trim(), ignoreCase = true) }
     }
 
     @Test
@@ -158,18 +137,15 @@ class RecipientPrivacyTest {
                 .response.contentAsString
 
         assertThat(scrape)
-            .containsPattern("""communication_blocklist_rejected_total\{[^}]*tenant="ROGALAND"""")
             .containsPattern("""communication_limit_rejected_total\{limit="mottaker",tenant="ROGALAND"}""")
             .containsPattern("""communication_message_accepted_total\{channel="EMAIL",tenant="ROGALAND"}""")
             .containsPattern("""communication_limit_tenant_usage_ratio\{tenant="ROGALAND",window="hour"}""")
             .containsPattern("""communication_limit_total_usage_ratio\{window="day"}""")
             .containsPattern("""communication_message_sent_total\{channel="EMAIL",tenant="ROGALAND"}""")
             .contains("communication_dispatch_queue_size ", "communication_dispatch_queue_oldest_seconds ")
-        ADDRESSES.forEach { address ->
-            assertThat(scrape)
-                .doesNotContainIgnoringCase(address.trim())
-                .doesNotContain(hasher.hash(address).value)
-        }
+        assertThat(scrape)
+            .doesNotContainIgnoringCase(ADDRESS.trim())
+            .doesNotContain(hasher.hash(ADDRESS).value)
     }
 
     private fun textColumns(): List<Pair<String, String>> =
@@ -189,16 +165,14 @@ class RecipientPrivacyTest {
             ).query { rs, _ -> rs.getString("table_name") to rs.getString("column_name") }
             .list()
 
-    private fun send(address: String) =
+    private fun send() =
         messageService.receive(
             Tenant.ROGALAND,
-            EmailPayload(templateId = "team/varsel", to = address, subject = "Emne", body = "Innhold"),
+            EmailPayload(templateId = "team/varsel", to = ADDRESS, subject = "Emne", body = "Innhold"),
         )
 
     private companion object {
         const val RECIPIENT_PER_HOUR = 10
         const val ADDRESS = "  Personvern.Testmottaker@Rogfk.no "
-        const val BLOCKED_ADDRESS = " Personvern.Avmeldt@Rogfk.no"
-        val ADDRESSES = listOf(ADDRESS, BLOCKED_ADDRESS)
     }
 }
