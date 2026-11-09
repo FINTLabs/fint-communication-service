@@ -13,21 +13,17 @@ import java.time.ZoneOffset
 class SendUsageRepository(
     private val jdbcClient: JdbcClient,
 ) {
-    fun recipientSentTimesSince(
-        recipient: RecipientHash,
-        since: Instant,
-    ): List<Instant> =
+    fun usageSince(since: Instant): List<SendUsage> =
         jdbcClient
-            .sql(
-                """
-                SELECT sent_at FROM send_usage
-                WHERE recipient_hash = :recipientHash AND sent_at > :since
-                ORDER BY sent_at
-                """.trimIndent(),
-            ).param("recipientHash", recipient.value)
+            .sql("SELECT recipient_hash, tenant, sent_at FROM send_usage WHERE sent_at > :since ORDER BY sent_at")
             .param("since", since.toOffsetDateTime())
-            .query { rs, _ -> rs.getObject("sent_at", OffsetDateTime::class.java).toInstant() }
-            .list()
+            .query { rs, _ ->
+                SendUsage(
+                    RecipientHash(rs.getString("recipient_hash")),
+                    Tenant.valueOf(rs.getString("tenant")),
+                    rs.getObject("sent_at", OffsetDateTime::class.java).toInstant(),
+                )
+            }.list()
 
     fun record(
         messageId: MessageId,
@@ -56,3 +52,9 @@ class SendUsageRepository(
 
     private fun Instant.toOffsetDateTime(): OffsetDateTime = OffsetDateTime.ofInstant(this, ZoneOffset.UTC)
 }
+
+data class SendUsage(
+    val recipient: RecipientHash,
+    val tenant: Tenant,
+    val sentAt: Instant,
+)

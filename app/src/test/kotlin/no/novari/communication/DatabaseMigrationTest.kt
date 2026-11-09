@@ -20,4 +20,15 @@ class DatabaseMigrationTest {
 
         assertThat(applied).contains("1")
     }
+
+    @Test
+    fun `send_usage has an index on sent_at for the limits and the cleanup`() {
+        val indexes =
+            jdbcClient
+                .sql("SELECT indexname FROM pg_indexes WHERE tablename = 'send_usage'")
+                .query(String::class.java)
+                .list()
+
+        assertThat(indexes).contains("send_usage_sent_at")
+    }
 }
