@@ -41,25 +41,27 @@ C4Context
     System(andre, "Andre Novari-applikasjoner", "Fremtidige konsumenter.")
     System(comm, "fint-communication-service", "Tar imot meldinger, validerer, rendrer maler og leverer via ekstern leverandør.")
     System_Ext(nam, "NAM", "Utsteder OAuth2-tokens. Planlagt, FFS-1970.")
-    System_Ext(acs, "Azure Communication Services", "E-postleverandør. Planlagt, FFS-1968.")
+    System_Ext(provider, "E-postleverandør", "Ikke koblet til ennå.")
     Person_Ext(mottaker, "Mottaker", "Ansatt i fylket eller annen mottaker av e-post.")
 
     Rel(flyt, comm, "Sender meldinger", "REST/JSON")
     Rel(andre, comm, "Sender meldinger", "REST/JSON")
     Rel(comm, nam, "Validerer token", "OIDC, planlagt")
-    Rel(comm, acs, "Sender e-post", "Azure SDK, planlagt")
-    Rel(acs, mottaker, "Leverer e-post", "SMTP")
+    Rel(comm, provider, "Sender e-post", "Planlagt")
+    Rel(provider, mottaker, "Leverer e-post", "SMTP")
 
     UpdateRelStyle(flyt, comm, $textColor="#3B82F6", $lineColor="#3B82F6")
     UpdateRelStyle(andre, comm, $textColor="#3B82F6", $lineColor="#3B82F6")
     UpdateRelStyle(comm, nam, $textColor="#3B82F6", $lineColor="#3B82F6", $offsetY="-30", $offsetX="-40")
-    UpdateRelStyle(comm, acs, $textColor="#3B82F6", $lineColor="#3B82F6")
-    UpdateRelStyle(acs, mottaker, $textColor="#3B82F6", $lineColor="#3B82F6", $offsetX="-30")
+    UpdateRelStyle(comm, provider, $textColor="#3B82F6", $lineColor="#3B82F6")
+    UpdateRelStyle(provider, mottaker, $textColor="#3B82F6", $lineColor="#3B82F6", $offsetX="-30")
     UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="1")
 ```
 
-Bare REST-kallene fra konsumentene til tjenesten finnes i dag. Autentisering (FFS-1970) og utsending
-via ACS (FFS-1968) er planlagt.
+REST-kallene fra konsumentene og utsendingskøen finnes i dag. Ingen e-postleverandør er koblet til
+ennå, så miljøene bruker leverandøren `logging`, som logger og forkaster meldingen
+(se [Hva skjer med meldingen etter 202](#hva-skjer-med-meldingen-etter-202)). Autentisering
+(FFS-1970) er planlagt.
 
 ## C4 nivå 2: Containere
 
@@ -71,17 +73,17 @@ C4Container
     Container_Ext(konsumentApp, "Konsument-applikasjon", "Spring Boot 3 eller 4, f.eks. Flyt", "Bygger SendMessageRequest og kaller tjenesten via fint-communication-client.")
     ContainerQueue_Ext(kafka, "Kafka", "novari.communication.*", "Sekundær inngang. Planlagt, fase 6.")
     System_Ext(prometheus, "Prometheus og Grafana", "Metrikker og dashboards i clusteret.")
-    ContainerDb(db, "Database", "PostgreSQL, fint-common", "Del av fint-communication-service. Grenser (send_usage).")
-    Container(app, "API-applikasjon", "Kotlin, Spring Boot 4, Java 25", "Del av fint-communication-service. REST API, validering, maler og meldingsmottak.")
+    ContainerDb(db, "Database", "PostgreSQL, fint-common", "Del av fint-communication-service. Grenser og utsendingskø.")
+    Container(app, "API-applikasjon", "Kotlin, Spring Boot 4, Java 25", "Del av fint-communication-service. REST API, validering, maler, mottak og utsending.")
     System_Ext(nam, "NAM", "OAuth2. Planlagt.")
-    System_Ext(acs, "Azure Communication Services", "E-post. Planlagt.")
+    System_Ext(provider, "E-postleverandør", "Ikke koblet til ennå.")
 
     Rel(konsumentApp, app, "POST /api/v1/messages", "HTTP/JSON")
     Rel(konsumentApp, kafka, "Publiserer meldinger", "Planlagt")
     Rel(kafka, app, "Konsumeres av", "Planlagt")
     Rel(app, db, "Leser og skriver", "JDBC")
     Rel(app, nam, "Validerer token", "Planlagt")
-    Rel(app, acs, "Sender e-post", "Planlagt")
+    Rel(app, provider, "Sender e-post", "Planlagt")
     Rel(prometheus, app, "Scraper /actuator/prometheus", "HTTP")
 
     UpdateRelStyle(konsumentApp, app, $textColor="#3B82F6", $lineColor="#3B82F6", $offsetY="-28")
@@ -89,17 +91,20 @@ C4Container
     UpdateRelStyle(kafka, app, $textColor="#3B82F6", $lineColor="#3B82F6")
     UpdateRelStyle(app, db, $textColor="#3B82F6", $lineColor="#3B82F6", $offsetY="-28")
     UpdateRelStyle(app, nam, $textColor="#3B82F6", $lineColor="#3B82F6", $offsetY="28")
-    UpdateRelStyle(app, acs, $textColor="#3B82F6", $lineColor="#3B82F6", $offsetY="-28")
+    UpdateRelStyle(app, provider, $textColor="#3B82F6", $lineColor="#3B82F6", $offsetY="-28")
     UpdateRelStyle(prometheus, app, $textColor="#3B82F6", $lineColor="#3B82F6", $offsetX="70")
     UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
 ```
 
 Blå bokser er en del av fint-communication-service, grå er eksterne. Tjenesten består av
 API-applikasjonen og en Postgres-database (`fint-common`), som migreres med Flyway ved oppstart.
-Databasen har tabellen `send_usage` for grensene per mottaker, tenant og totalt. Meldingsstatus kommer i FFS-2337.
+Databasen har tabellene `send_usage` for grensene per mottaker, tenant og totalt og
+`dispatch_queue` for meldinger som venter på å bli
+sendt. Meldingsstatus kommer i FFS-2337.
 Prometheus scraper `/actuator/prometheus` via en PodMonitor som Flais lager. Dashboardet ligger i
 `grafana/`, og varslene og hva vakthavende gjør er beskrevet i [runbooken](runbook.md).
-API-applikasjonen holder ingen tilstand i minnet og kan skaleres horisontalt. Malene ligger i
+API-applikasjonen holder ingen tilstand i minnet og kan skaleres horisontalt; køen ligger i
+databasen og deles av alle replikaer. Malene ligger i
 applikasjonens classpath og er ikke en egen container.
 
 ## C4 nivå 3: Komponenter
@@ -119,8 +124,13 @@ C4Component
     Component(hasher, "RecipientHasher", "recipient", "HMAC-SHA256 av normalisert adresse.")
     ComponentDb(usage, "send_usage", "Postgres", "Én rad per akseptert melding.")
 
-    Component(dispatcher, "MessageDispatcher", "message.dispatch", "Port for leveranse. I dag: logger og forkaster.")
+    Component(dispatcher, "MessageDispatcher", "message.dispatch", "Port for leveranse. Legger meldingen i køen.")
+    ComponentDb(queue, "dispatch_queue", "Postgres", "Meldinger som venter på utsending, kryptert innhold.")
     Component(usageMetrics, "LimitUsageMetrics", "limit", "Utnyttelse av grensene per tenant og totalt, hvert minutt.")
+
+    System_Ext(provider, "E-postleverandør", "Ikke koblet til ennå.")
+    Component(adapter, "EmailAdapter", "email", "Leverandøradapter valgt med konfig. Foreløpig bare LoggingEmailAdapter.")
+    Component(worker, "DispatchWorker", "message.dispatch", "Henter klare meldinger, sender og prøver igjen.")
 
     Rel(konsumentApp, controller, "POST /api/v1/messages", "HTTP/JSON")
     Rel(controller, validator, "Validerer")
@@ -131,6 +141,10 @@ C4Component
     Rel(limiter, usage, "Teller og skriver", "JDBC")
     Rel(service, dispatcher, "Leverer videre")
     Rel(usageMetrics, usage, "Teller per tenant", "JDBC")
+    Rel(dispatcher, queue, "INSERT", "JDBC")
+    Rel(worker, queue, "Reserverer, sletter", "SKIP LOCKED")
+    Rel(worker, adapter, "send(id, e-post)")
+    Rel(adapter, provider, "Sender e-post", "Planlagt")
 
     UpdateRelStyle(konsumentApp, controller, $textColor="#3B82F6", $lineColor="#3B82F6")
     UpdateRelStyle(controller, validator, $textColor="#3B82F6", $lineColor="#3B82F6")
@@ -141,11 +155,16 @@ C4Component
     UpdateRelStyle(limiter, usage, $textColor="#3B82F6", $lineColor="#3B82F6")
     UpdateRelStyle(service, dispatcher, $textColor="#3B82F6", $lineColor="#3B82F6")
     UpdateRelStyle(usageMetrics, usage, $textColor="#3B82F6", $lineColor="#3B82F6")
+    UpdateRelStyle(dispatcher, queue, $textColor="#3B82F6", $lineColor="#3B82F6")
+    UpdateRelStyle(worker, queue, $textColor="#3B82F6", $lineColor="#3B82F6")
+    UpdateRelStyle(worker, adapter, $textColor="#3B82F6", $lineColor="#3B82F6")
+    UpdateRelStyle(adapter, provider, $textColor="#3B82F6", $lineColor="#3B82F6")
     UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="1")
 ```
 
 Alle blå bokser er komponenter i API-applikasjonen. `GlobalExceptionHandler` har ingen piler: Spring kaller den når en av de andre komponentene kaster
-en feil. Leveransen fra `MessageDispatcher` til ACS er planlagt (FFS-1968) og vist på nivå 2.
+en feil. `DispatchQueueMetrics` (størrelse og alder på køen) er ikke tegnet; den leser `dispatch_queue`
+hvert minutt, som `LimitUsageMetrics` gjør med `send_usage`.
 
 ### Pakkestruktur
 
@@ -153,6 +172,8 @@ en feil. Leveransen fra `MessageDispatcher` til ACS er planlagt (FFS-1968) og vi
 no.novari.communication
 ├── Application.kt
 ├── config/              ClockConfiguration
+├── email/               EmailAdapter, EmailSendOutcome, LoggingEmailAdapter, EmailProperties,
+│                        EmailConfiguration
 ├── api/                 MessageController
 │   ├── exceptions/      GlobalExceptionHandler, RequestValidationException
 │   └── validation/      SendMessageRequestValidator, ValidatedEmailRequest, ValidationError
@@ -162,7 +183,10 @@ no.novari.communication
 ├── message/             MessageService
 │   ├── domain/          OutgoingMessage, MessagePayload, EmailPayload, MessageId,
 │   │                    MessageStatus, MessageChannel, EmailAddress
-│   └── dispatch/        MessageDispatcher, LoggingMessageDispatcher
+│   └── dispatch/        MessageDispatcher, QueueingMessageDispatcher, DispatchWorker,
+│                        DispatchQueueRepository, QueuedMessage, PayloadCodec, PayloadCipher,
+│                        DispatchProperties, DispatchConfiguration, DispatchMetrics,
+│                        DispatchQueueMetrics
 ├── recipient/           RecipientHasher, RecipientHash, RecipientHashingProperties,
 │                        RecipientHashingConfiguration
 ├── retention/           RetentionCleanupJob, ExpiredRowsCleaner, RetentionProperties,
@@ -174,23 +198,25 @@ no.novari.communication
     └── loading/         ClasspathEmailTemplateLoader, EmailTemplateConfiguration
 ```
 
-| Pakke                 | Ansvar                                                                                             |
-|-----------------------|----------------------------------------------------------------------------------------------------|
-| `api`                 | HTTP-inngangen. Tar imot kontrakten fra `model`, validerer og oversetter til domenet.              |
-| `api.validation`      | Validering av requesten mot reglene og mot malen. Samler opp alle feil.                            |
-| `api.exceptions`      | Oversetter feil til ProblemDetail-responser (RFC 9457).                                            |
-| `limit`               | Grenser for utsending (per mottaker, per tenant og totalt), forbrukstabellen og opprydning av den. |
-| `message`             | Mottak av meldinger (`MessageService`).                                                            |
-| `message.domain`      | Den interne domenemodellen. Kanal-agnostisk på toppnivå.                                           |
-| `message.dispatch`    | Porten for å levere en akseptert melding videre, og dagens implementasjon av den.                  |
-| `recipient`           | Pseudonymisering av mottakere: HMAC-SHA256 av normalisert adresse med hemmelig nøkkel.             |
-| `retention`           | Planlagt opprydning av utløpte rader. Hver tabell registrerer sin egen `ExpiredRowsCleaner`.       |
-| `template`            | Ferdig lastede maler og rendering.                                                                 |
-| `template.definition` | Lesing og kontroll av malfiler.                                                                    |
-| `template.loading`    | Finner malene på classpath og registrerer katalogen som Spring-bean.                               |
-| `config`              | Felles Spring-konfigurasjon (`Clock`).                                                             |
+| Pakke                 | Ansvar                                                                                                      |
+|-----------------------|-------------------------------------------------------------------------------------------------------------|
+| `api`                 | HTTP-inngangen. Tar imot kontrakten fra `model`, validerer og oversetter til domenet.                       |
+| `api.validation`      | Validering av requesten mot reglene og mot malen. Samler opp alle feil.                                     |
+| `api.exceptions`      | Oversetter feil til ProblemDetail-responser (RFC 9457).                                                     |
+| `email`               | Utsending av e-post via en leverandør: porten `EmailAdapter`, `logging`-adapteren og valget av adapter.     |
+| `limit`               | Grenser for utsending (per mottaker, per tenant og totalt), forbrukstabellen og opprydning av den.          |
+| `message`             | Mottak av meldinger (`MessageService`).                                                                     |
+| `message.domain`      | Den interne domenemodellen. Kanal-agnostisk på toppnivå.                                                    |
+| `message.dispatch`    | Porten for å levere en akseptert melding videre, køen i databasen og jobben som sender meldingene fra køen. |
+| `recipient`           | Pseudonymisering av mottakere: HMAC-SHA256 av normalisert adresse med hemmelig nøkkel.                      |
+| `retention`           | Planlagt opprydning av utløpte rader. Hver tabell registrerer sin egen `ExpiredRowsCleaner`.                |
+| `template`            | Ferdig lastede maler og rendering.                                                                          |
+| `template.definition` | Lesing og kontroll av malfiler.                                                                             |
+| `template.loading`    | Finner malene på classpath og registrerer katalogen som Spring-bean.                                        |
+| `config`              | Felles Spring-konfigurasjon (`Clock`).                                                                      |
 
-Domenet (`message.domain`) avhenger ikke av `api`, `template` eller Spring. Fra `model` bruker
+Domenet (`message.domain`) avhenger ikke av `api`, `template` eller Spring. `email` kjenner
+`EmailPayload` fra domenet, men ikke køen. Fra `model` bruker
 domenet bare `Tenant`, slik at samme navn brukes i kontrakten, logger og senere i database og
 metrikker. Resten av kontraktklassene i `model` er det bare `api` som kjenner.
 
@@ -354,7 +380,8 @@ POST /api/v1/messages
 { "id": "0d6f7e0a-3c1b-4f53-9a35-0a4f8f7f2b11" }
 ```
 
-Eksempelet viser en tenkt mal; repoet inneholder foreløpig ingen maler.
+Eksempelet viser en tenkt mal; repoet har foreløpig bare testmalen `novari/test`, som brukes for å
+verifisere utsending i et miljø.
 
 `message` er polymorf: `Message` er et sealed interface i `model`, og `channel` bestemmer hvilken
 subtype JSON-en leses som (`@JsonTypeInfo`/`@JsonSubTypes`). I dag finnes bare `EmailMessage`
@@ -380,7 +407,7 @@ sequenceDiagram
     participant H as RecipientHasher
     participant L as SendLimiter
     participant DB as Postgres
-    participant D as MessageDispatcher
+    participant D as QueueingMessageDispatcher
 
     C->>MC: POST /api/v1/messages (JSON)
     Note over MC: Jackson leser JSON til SendMessageRequest
@@ -407,6 +434,7 @@ sequenceDiagram
     else Innenfor grensene
         L->>DB: INSERT send_usage
         MS->>D: dispatch(message)
+        D->>DB: INSERT dispatch_queue (kryptert innhold)
         MS-->>MC: MessageId (commit)
         MC-->>C: 202 Accepted {id}
     end
@@ -416,28 +444,93 @@ sequenceDiagram
    alle ugyldige felt på én gang.
 2. Malen rendres mens requesten behandles (synkront), ikke ved utsending. Feil i verdiene blir
    dermed 400 med en gang, og meldingen er uavhengig av senere endringer i malen.
-3. Svaret 202 betyr at meldingen er akseptert, ikke at den er levert. Leveransen skjer asynkront
-   (planlagt i FFS-1968).
-4. Rekkefølgen er validering → grenser (mottaker → tenant →
-   total) → registrering av forbruk → dispatch → 202. Forbruket registreres bare når alle grenser
-   passerer, og i samme transaksjon som dispatch: feiler dispatch, rulles forbruket tilbake. Se
-   [Grenser](#grenser).
+3. Svaret 202 betyr at meldingen er akseptert og lagret i køen, ikke at den er levert. Utsendingen
+   skjer asynkront, se [Hva skjer med meldingen etter 202](#hva-skjer-med-meldingen-etter-202).
+4. Rekkefølgen er validering → grenser (mottaker → tenant → total) → registrering
+   av forbruk → dispatch (INSERT i køen) → 202.
+   Forbruket registreres bare når alle grenser passerer, og i samme transaksjon som dispatch: feiler
+   dispatch, rulles forbruket tilbake, og en melding som er i køen, er alltid talt med. Kallet til
+   leverandøren skjer etter commit. Se [Grenser](#grenser).
 
 ### Hva skjer med meldingen etter 202
 
-`MessageDispatcher` er porten mellom mottak og leveranse. Dagens implementasjon,
-`LoggingMessageDispatcher`, logger `id`, `tenant`, `channel` og `templateId` og forkaster meldingen.
-Databasen finnes, men meldinger lagres ikke ennå (FFS-2337), og det finnes ingen kø eller
-leverandøradapter.
+`MessageDispatcher` er porten mellom mottak og utsending. `QueueingMessageDispatcher` legger
+meldingen i tabellen `dispatch_queue`, i samme transaksjon som forbruket. `DispatchWorker` kjører i
+hver pod hvert andre sekund (`communication.dispatch.poll-interval`), reserverer meldinger som er
+klare, og sender dem via `EmailAdapter` utenfor transaksjonen.
 
 ```mermaid
 flowchart LR
     MS["MessageService"] --> port{{"MessageDispatcher"}}
-    port --> now["LoggingMessageDispatcher<br/>(i dag: logger og forkaster)"]
-    port -.-> next["Asynkron utsending via EmailAdapter → ACS<br/>(planlagt, FFS-1968)"]
+    port --> queue["QueueingMessageDispatcher"]
+    queue --> table[("dispatch_queue<br/>(kryptert innhold)")]
+    worker["DispatchWorker<br/>(hvert 2. sekund)"] --> table
+    worker --> adapter{{"EmailAdapter"}}
+    adapter --> log["LoggingEmailAdapter<br/>(provider: logging, default)"]
 ```
 
-Controller og service endres ikke når implementasjonen byttes ut.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant W as DispatchWorker
+    participant DB as Postgres
+    participant PC as PayloadCodec
+    participant A as EmailAdapter
+
+    W->>DB: UPDATE … FOR UPDATE SKIP LOCKED (status PROCESSING, attempts + 1, lease 5 min)
+    DB-->>W: reserverte meldinger
+    loop Hver melding
+        W->>PC: decodeEmail(id, krypterte bytes)
+        PC-->>W: EmailPayload
+        W->>A: send(id, payload)
+        A-->>W: Sent, Retryable eller Permanent
+        alt Sent eller Permanent
+            W->>DB: DELETE (der attempts er uendret)
+        else Retryable og forsøk igjen
+            W->>DB: status RECEIVED, next_attempt_at = nå + backoff
+        end
+    end
+```
+
+- **Utfall.** Adapteren kaster ikke feil, men returnerer `EmailSendOutcome`: `Sent`,
+  `Retryable(årsak)` eller `Permanent(årsak)`. Workeren logger utfallet og teller det.
+
+  | Utfall      | Brukes når                                                                      | `reason`            |
+  |-------------|---------------------------------------------------------------------------------|---------------------|
+  | `Sent`      | Leverandøren har tatt imot meldingen.                                           | –                   |
+  | `Permanent` | Leverandøren avviser meldingen, og et nytt forsøk vil gi samme svar.            | `rejected`          |
+  | `Retryable` | Nøkkelen er feil eller rotert.                                                  | `unauthorized`      |
+  | `Retryable` | Leverandøren svarer ikke i tide.                                                | `timeout`           |
+  | `Retryable` | Leverandøren struper trafikken (med ventetid hvis den oppgir en).               | `throttled`         |
+  | `Retryable` | Feil hos leverandøren.                                                          | `server-error`      |
+  | `Retryable` | Nettverksfeil.                                                                  | `io`                |
+  | `Retryable` | Annen feil i adapteren eller ved dekryptering.                                  | `unexpected`        |
+
+  Hvilke svar fra leverandøren som gir hvilket utfall, beskrives sammen med adapteren. Feil nøkkel
+  regnes som forbigående, siden den skyldes konfig, og meldingen da kan sendes når konfigen er rettet.
+- **Retry.** Workeren prøver på nytt etter 1, 2, 4 … minutter, høyst 1 time mellom forsøkene, og
+  høyst 8 forsøk (ca. 2 timer). Ventetid som leverandøren oppgir, brukes når den er lengre. Når
+  forsøkene er brukt opp, feiler meldingen med `retries-exhausted`.
+- **Restart og flere replikaer.** Reservasjonen er én `UPDATE … WHERE message_id IN (SELECT … FOR
+  UPDATE SKIP LOCKED)`, så to replikaer får aldri samme rad. En reservert melding har `locked_until`
+  (lease, 5 min). Stopper podden midt i en sending, tas meldingen på nytt når leasen er ute. Leasen
+  må være lengre enn det et kall til leverandøren kan ta, inkludert retry i adapteren.
+- **Sent svar.** Sletting og ny planlegging gjelder bare raden med samme `attempts` som da den ble
+  reservert. Et svar som kommer etter at en annen replika har tatt over meldingen, endrer derfor
+  ingenting; workeren logger det.
+- **Innhold.** `PayloadCodec` serialiserer adresse, emne, innhold og `replyTo` til JSON og krypterer
+  det med AES-256-GCM (`PayloadCipher`, tilfeldig nonce per melding). Meldings-ID-en er associated
+  data, så krypterte bytes kan ikke flyttes til en annen rad. `tenant`, `channel` og `templateId`
+  ligger i klartekst, siden de trengs til logg og metrikker. Nøkkelen er
+  `COMMUNICATION_DISPATCH_ENCRYPTION_KEY`.
+- **Metrikker.** `DispatchMetrics` teller `communication.message.sent` (`tenant`, `channel`),
+  `communication.message.retried` og `communication.message.failed` (begge også `reason`).
+  `DispatchQueueMetrics` publiserer `communication.dispatch.queue.size` og
+  `communication.dispatch.queue.oldest` (sekunder). Varslene står i [runbooken](runbook.md).
+- **Leverandøren `logging`.** Logger meldings-ID og mal og returnerer `Sent`. Default lokalt, i
+  tester og i beta inntil videre.
+
+Controller og service endres ikke når leverandøren byttes.
 
 ### Validering
 
@@ -658,36 +751,59 @@ Lister rendres ved at blokken mellom `{{#liste}}` og `{{/liste}}` gjentas for hv
 
 ```mermaid
 stateDiagram-v2
-    [*] --> RECEIVED : POST godkjent
-    RECEIVED --> PROCESSING : planlagt
-    PROCESSING --> SENT : planlagt
-    PROCESSING --> FAILED : planlagt
+    [*] --> RECEIVED : POST godkjent, lagt i køen
+    RECEIVED --> PROCESSING : reservert av DispatchWorker
+    PROCESSING --> SENT : leverandøren tok imot
+    PROCESSING --> RECEIVED : forbigående feil, nytt forsøk
+    PROCESSING --> PROCESSING : lease utløpt, ny reservasjon
+    PROCESSING --> FAILED : permanent feil eller forsøk brukt opp
     SENT --> [*]
     FAILED --> [*]
 ```
 
-I dag opprettes alle meldinger med status `RECEIVED`, og det finnes ingen overganger. Overganger,
-og om `FAILED` skal kunne prøves på nytt, avgjøres sammen med leveransen i FFS-1968.
+`RECEIVED` og `PROCESSING` er kolonnen `status` i `dispatch_queue`. `SENT` og `FAILED` er
+sluttstatus: raden slettes, og utfallet finnes bare i loggen (`Melding sendt` / `Melding feilet`) og i
+metrikkene. Status per meldings-ID som konsumenten kan slå opp, kommer i FFS-2337. En melding som har
+feilet, prøves ikke på nytt av tjenesten; konsumenten må sende den på nytt.
 
 ## Database
 
 Tjenesten har en egen Postgres-database, `fint-common`, som Flais setter opp fra `spec.database` i
 `flais.yaml`. Tabeller som gjelder én tenant får `tenant_id`.
 
-| Del        | Løsning                                                                                                           |
-|------------|-------------------------------------------------------------------------------------------------------------------|
-| Tilgang    | Spring Data JDBC. Egen SQL skrives med `JdbcClient`.                                                              |
-| Skjema     | Flyway, `classpath:db/migration`, kjøres ved oppstart. `V1__baseline` er tom.                                     |
-| Tabeller   | `send_usage` (`V2`): forbruk for grensene.                                                                        |
-| Readiness  | `db` er med i readiness-gruppen; podden tas ut av trafikk når databasen ikke svarer.                              |
-| Opprydning | `RetentionCleanupJob` kjører kl. 03.15 (Europe/Oslo) og kaller hver `ExpiredRowsCleaner`.                         |
-| Retensjon  | Metadata om meldinger beholdes i 60 dager (`communication.retention.metadata`). `send_usage` beholdes i 24 timer. |
+| Del        | Løsning                                                                                                                                                                                      |
+|------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Tilgang    | Spring Data JDBC. Egen SQL skrives med `JdbcClient`.                                                                                                                                         |
+| Skjema     | Flyway, `classpath:db/migration`, kjøres ved oppstart. `V1__baseline` er tom.                                                                                                                |
+| Tabeller   | `send_usage` (`V2`): forbruk for grensene. `dispatch_queue` (`V4`): meldinger som venter på å bli sendt.                                                                                     |
+| Readiness  | `db` er med i readiness-gruppen; podden tas ut av trafikk når databasen ikke svarer.                                                                                                         |
+| Opprydning | `RetentionCleanupJob` kjører kl. 03.15 (Europe/Oslo) og kaller hver `ExpiredRowsCleaner`.                                                                                                    |
+| Retensjon  | Metadata om meldinger beholdes i 60 dager (`communication.retention.metadata`). `send_usage` beholdes i 24 timer. En rad i `dispatch_queue` slettes når meldingen er sendt eller har feilet. |
 
 Planlagte tabeller:
 
-| Oppgave  | Innhold                        |
-|----------|--------------------------------|
-| FFS-2337 | `message`-tabellen med status. |
+| Oppgave  | Innhold                                                                                                          |
+|----------|------------------------------------------------------------------------------------------------------------------|
+| FFS-2337 | `message`-tabellen med status. `dispatch_queue` er en arbeidskø, ikke statuslager, og kan beholdes ved siden av. |
+
+### Utsendingskø
+
+`dispatch_queue` (`V4`) har én rad per akseptert melding som ikke er sendt eller har feilet ennå:
+
+| Kolonne                            | Innhold                                                                           |
+|------------------------------------|-----------------------------------------------------------------------------------|
+| `message_id`                       | Meldings-ID (primærnøkkel).                                                       |
+| `tenant`, `channel`, `template_id` | Enum-navn og mal-ID, til logg og metrikker.                                       |
+| `status`                           | `RECEIVED` eller `PROCESSING` (CHECK).                                            |
+| `attempts`                         | Antall reservasjoner. Skiller et forsøk fra et senere forsøk på en annen replika. |
+| `next_attempt_at`                  | Når meldingen tidligst kan sendes (mottakstidspunktet, eller etter backoff).      |
+| `locked_until`                     | Slutten på leasen for en reservert melding.                                       |
+| `received_at`                      | Mottakstidspunktet, fra `Clock`. Gir alderen på køen.                             |
+| `payload`                          | Adresse, emne, innhold og `replyTo`, kryptert med AES-256-GCM (`bytea`).          |
+
+Indeksen `dispatch_queue_next_attempt_at` brukes når workeren finner meldinger som er klare.
+`DispatchQueueMetrics` teller radene og finner den eldste hvert minutt
+(`communication.dispatch.queue-metrics-refresh`).
 
 ### Mottaker-hashing
 
@@ -785,8 +901,9 @@ En tenantgrense lavere enn mottakergrensen er tillatt.
   `antall − grense` (eldste først) faller ut av vinduet. Er flere grenser brutt, får svaret grensen
   med lengst ventetid, slik at `limit` og `Retry-After` stemmer overens; ved likhet vinner den første
   i rekkefølgen. Svaret er i hele sekunder rundet opp, minst 1.
-- **Transaksjon.** Telling, registrering og dispatch skjer i samme transaksjon
-  (`MessageService.receive`). En avvist eller feilet melding etterlater ingen rad.
+- **Transaksjon.** Telling, registrering og dispatch (INSERT i `dispatch_queue`) skjer i samme
+  transaksjon (`MessageService.receive`). En avvist melding etterlater ingen rad, verken i
+  `send_usage` eller i køen. Kallet til leverandøren skjer etter commit.
 - **Opprydning.** `SendUsageCleaner` sletter rader eldre enn 24 timer.
 - **Metrikker.** `DatabaseSendLimiter` øker `communication.limit.rejected` (tagger `limit` og `tenant`)
   ved hver 429. `MessageMetrics` øker `communication.message.accepted` (tagger `tenant` og `channel`)
@@ -813,53 +930,57 @@ serie per mottaker; avvisningene der telles med `limit="mottaker"`.
 
 Mottaker, emne, innhold og variabelverdier kan inneholde personopplysninger.
 
-| Tiltak                                                                                                                              | Hvor                                                         |
-|-------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------|
-| Klienter kan ikke sende fritekst; alt innhold kommer fra gjennomgåtte maler.                                                        | Malsystemet                                                  |
-| `toString()` maskerer mottaker, emne, innhold og verdier.                                                                           | `EmailMessage`, `EmailPayload`, `RenderedEmail`              |
-| Feilmeldinger gjentar aldri innsendte verdier. Navn tas bare med når de har formen til et variabelnavn.                             | `SendMessageRequestValidator`                                |
-| Jacksons feilmeldinger, som kan sitere verdier, brukes ikke i respons eller logg; bare JSON-stien.                                  | `GlobalExceptionHandler`                                     |
-| Loggen ved mottak inneholder bare `id`, `tenant`, `channel` og `templateId`.                                                        | `LoggingMessageDispatcher`                                   |
-| Mottakere lagres bare som HMAC-hash. Nøkkel, adresse og hash logges aldri.                                                          | `RecipientHasher`                                            |
-| 429-svaret og WARN-loggen har bare grensetype, `tenant` og meldings-ID, aldri adresse eller hash.                                   | `GlobalExceptionHandler`                                     |
-| Tellerne og gaugene for grensene og aksepterte meldinger har bare enum-verdier som tagger (`limit`, `tenant`, `channel`, `window`). | `DatabaseSendLimiter`, `MessageMetrics`, `LimitUsageMetrics` |
-| JSON-loggen har de samme meldingene som før og ingen MDC-felt; en test sjekker formatet og at adressen ikke er med.                 | `StructuredLoggingTest`                                      |
-| En test sjekker at adressen ikke finnes i logg, i noen tekstkolonne i databasen, i metrikk-tagger eller i Prometheus-scrapen.       | `RecipientPrivacyTest`                                       |
+| Tiltak                                                                                                                                                             | Hvor                                                                            |
+|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+| Klienter kan ikke sende fritekst; alt innhold kommer fra gjennomgåtte maler.                                                                                       | Malsystemet                                                                     |
+| `toString()` maskerer mottaker, emne, innhold og verdier.                                                                                                          | `EmailMessage`, `EmailPayload`, `RenderedEmail`                                 |
+| Feilmeldinger gjentar aldri innsendte verdier. Navn tas bare med når de har formen til et variabelnavn.                                                            | `SendMessageRequestValidator`                                                   |
+| Jacksons feilmeldinger, som kan sitere verdier, brukes ikke i respons eller logg; bare JSON-stien.                                                                 | `GlobalExceptionHandler`                                                        |
+| Loggen ved mottak inneholder bare `id`, `tenant`, `channel` og `templateId`.                                                                                       | `QueueingMessageDispatcher`                                                     |
+| Mottakere lagres bare som HMAC-hash. Nøkkel, adresse og hash logges aldri.                                                                                         | `RecipientHasher`                                                               |
+| 429-svaret og WARN-loggen har bare grensetype, `tenant` og meldings-ID, aldri adresse eller hash.                                                                  | `GlobalExceptionHandler`                                                        |
+| Tellerne og gaugene for grensene, aksepterte og sendte meldinger og køen har bare enum-verdier som tagger (`limit`, `tenant`, `channel`, `window`, `reason`).      | `DatabaseSendLimiter`, `MessageMetrics`, `LimitUsageMetrics`, `DispatchMetrics` |
+| JSON-loggen har de samme meldingene som før og ingen MDC-felt; en test sjekker formatet og at adressen ikke er med.                                                | `StructuredLoggingTest`                                                         |
+| Innholdet i køen er kryptert med AES-256-GCM og en egen nøkkel; bare `tenant`, `channel` og `templateId` er i klartekst.                                           | `PayloadCodec`, `PayloadCipher`                                                 |
+| Utsendingsloggen har meldings-ID, status, tenant, kanal, mal, antall forsøk, årsak og feilkode fra leverandøren, aldri feilmeldingen fra leverandøren.             | `DispatchWorker`                                                                |
+| Nøkler vises aldri i oppstartsfeil eller `toString()`.                                                                                                             | `DispatchProperties`                                                            |
+| En test sjekker at adressen ikke finnes i logg, i noen tekst- eller binærkolonne i databasen (også `dispatch_queue`), i metrikk-tagger eller i Prometheus-scrapen. | `RecipientPrivacyTest`                                                          |
 
 `replyTo` kommer fra malen og er en Novari-adresse, så den vises umaskert.
 
 ## Drift
 
-| Egenskap      | Verdi                                                                                                                                                                                            |
-|---------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Image         | `ghcr.io/fintlabs/fint-communication-service`, distroless Java 25                                                                                                                                |
-| Namespace     | `fintlabs-no` (én deployment for alle tenants)                                                                                                                                                   |
-| Eksponering   | Bare intern i clusteret (ingen ingress)                                                                                                                                                          |
-| Port          | 8080                                                                                                                                                                                             |
-| Probes        | `/actuator/health` (startup), `/actuator/health/liveness`, `/actuator/health/readiness`                                                                                                          |
-| Logging       | JSON (Spring Boots `logstash`-format) til stdout, satt i `application.yaml`. Samles inn av Loki.                                                                                                 |
-| Log-nivå      | `logging.level.<pakke>` som env i flais.yaml eller overlay, f.eks. `logging.level.no.novari.communication=DEBUG`.                                                                                |
-| Metrikker     | `/actuator/metrics` og `/actuator/prometheus` på port 8080. Flais lager en PodMonitor fra `spec.observability.metrics`. Metrikkene for grenser er beskrevet i [runbooken](runbook.md#metrikker). |
-| Dashboard     | `grafana/fint-communication-service.json`, importeres manuelt i Grafana.                                                                                                                         |
-| Varsling      | Metrikker, terskler og varighet står i [runbooken](runbook.md#varselregler). Reglene registreres manuelt i Grafana Alerts.                                                                       |
-| Ressurser     | 256–512 Mi minne, 50–500m CPU, 1 replika                                                                                                                                                         |
-| Database      | Postgres `fint-common` via Flais (`spec.database`). Readiness inkluderer `db`.                                                                                                                   |
-| Hemmeligheter | 1Password-item via `spec.onePassword.itemPath` (beta: `vaults/aks-beta-vault/items/fint-communication-service`), med `COMMUNICATION_RECIPIENT_HASHING_KEY`.                                      |
-| Miljøer       | beta (`aks-beta-fint-2021-11-23`). Produksjon (`api`) er ikke satt opp.                                                                                                                          |
-| Bygg/deploy   | Push til `main` bygger image og deployer til beta (GitHub Actions).                                                                                                                              |
+| Egenskap         | Verdi                                                                                                                                                                                                  |
+|------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Image            | `ghcr.io/fintlabs/fint-communication-service`, distroless Java 25                                                                                                                                      |
+| Namespace        | `fintlabs-no` (én deployment for alle tenants)                                                                                                                                                         |
+| Eksponering      | Bare intern i clusteret (ingen ingress)                                                                                                                                                                |
+| Port             | 8080                                                                                                                                                                                                   |
+| Probes           | `/actuator/health` (startup), `/actuator/health/liveness`, `/actuator/health/readiness`                                                                                                                |
+| Logging          | JSON (Spring Boots `logstash`-format) til stdout, satt i `application.yaml`. Samles inn av Loki.                                                                                                       |
+| Log-nivå         | `logging.level.<pakke>` som env i flais.yaml eller overlay, f.eks. `logging.level.no.novari.communication=DEBUG`.                                                                                      |
+| Metrikker        | `/actuator/metrics` og `/actuator/prometheus` på port 8080. Flais lager en PodMonitor fra `spec.observability.metrics`. Metrikkene for grenser er beskrevet i [runbooken](runbook.md#metrikker).       |
+| Dashboard        | `grafana/fint-communication-service.json`, importeres manuelt i Grafana.                                                                                                                               |
+| Varsling         | Metrikker, terskler og varighet står i [runbooken](runbook.md#varselregler). Reglene registreres manuelt i Grafana Alerts.                                                                             |
+| Ressurser        | 256–512 Mi minne, 50–500m CPU, 1 replika                                                                                                                                                               |
+| Database         | Postgres `fint-common` via Flais (`spec.database`). Readiness inkluderer `db`.                                                                                                                         |
+| Hemmeligheter    | 1Password-item via `spec.onePassword.itemPath` (beta: `vaults/aks-beta-vault/items/fint-communication-service`), med `COMMUNICATION_RECIPIENT_HASHING_KEY` og `COMMUNICATION_DISPATCH_ENCRYPTION_KEY`. |
+| E-postleverandør | `communication.email.provider`: `logging` (default, også i beta).                                                                                                                                      |
+| Miljøer          | beta (`aks-beta-fint-2021-11-23`). Produksjon (`api`) er ikke satt opp.                                                                                                                                |
+| Bygg/deploy      | Push til `main` bygger image og deployer til beta (GitHub Actions).                                                                                                                                    |
 
 All tilstand ligger i databasen, så API-applikasjonen kan skaleres horisontalt. Opprydningsjobben
-kjører da på hver replika; slettingene er idempotente, så det gjør ingen skade.
+kjører da på hver replika; slettingene er idempotente, så det gjør ingen skade. `DispatchWorker` kjører
+også på hver replika, og `SKIP LOCKED` fordeler meldingene mellom dem.
 
 ## Videre utvikling
 
 | Oppgave  | Innhold                                                                            |
 |----------|------------------------------------------------------------------------------------|
-| FFS-1968 | `EmailAdapter` mot ACS, asynkron utsending, statusoverganger.                      |
 | FFS-1969 | Sentral layout rundt rendret innhold, `text/plain`-variant, HTML-regler for maler. |
 | FFS-1970 | Bearer-token fra NAM (Spring Security), 401 som ProblemDetail.                     |
-| FFS-2337 | Meldingsstatus per `MessageId`.                                                    |
-| FFS-2338 | Leveringsrapporter fra ACS.                                                        |
+| FFS-2337 | Meldingsstatus per `MessageId`, også `SENT` og `FAILED` som i dag bare logges.     |
+| FFS-2379 | Leveringsrapporter fra e-postleverandøren, knyttet til meldingen via meldings-ID.  |
 | Fase 6   | Kafka som sekundær inngang, med samme validering og mottak som REST.               |
 
 ## Sentrale beslutninger
@@ -875,7 +996,7 @@ kjører da på hver replika; slettingene er idempotente, så det gjør ingen ska
 | Malen rendres ved mottak.                                                                                           | Feil blir 400 med en gang; meldingen er uavhengig av senere malendringer.                                                                                       |
 | ProblemDetail (RFC 9457) for alle feil.                                                                             | Standardformat, støttet direkte av Spring.                                                                                                                      |
 | JMustache direkte, egen kontroll av taggene.                                                                        | Logic-less maler; reglene kan håndheves ved oppstart.                                                                                                           |
-| Port (`MessageDispatcher`) mellom mottak og leveranse.                                                              | Leveransen kan byttes ut uten å endre API eller service.                                                                                                        |
+| Port (`MessageDispatcher`) mellom mottak og leveranse, og port (`EmailAdapter`) mot leverandøren.                   | Leveransen og leverandøren kan byttes ut uten å endre API eller service.                                                                                        |
 | `model` uten avhengigheter ved kjøring (bare `compileOnly` `jackson-annotations`), `client` uten autokonfigurasjon. | Bibliotekene kan brukes i alle Spring Boot 3- og 4-applikasjoner (Jackson 2 og 3).                                                                              |
 | Spring Data JDBC, ikke JPA.                                                                                         | Immutable Kotlin-klasser uten proxies. Tellere (`INSERT … ON CONFLICT`) og opprydning er native SQL uansett.                                                    |
 | Mottakere lagres som HMAC-SHA256 med hemmelig nøkkel, ikke ren SHA-256.                                             | E-postadresser er lette å gjette; uten nøkkelen kan hashen ikke slås opp mot en liste med adresser.                                                             |
@@ -883,7 +1004,7 @@ kjører da på hver replika; slettingene er idempotente, så det gjør ingen ska
 | Opprydning uten ShedLock.                                                                                           | Slettingene er idempotente; samtidige kjøringer på flere replikaer gjør ingen skade.                                                                            |
 | Grenser uten lås.                                                                                                   | Kan slippe gjennom noen få meldinger over grensen ved samtidige forespørsler. Enklere kode.                                                                     |
 | Én rad per akseptert melding i `send_usage`, ikke aggregerte bøtter.                                                | Ekte glidende vindu og eksakt `Retry-After`; få rader ved disse volumene.                                                                                       |
-| Forbruk og dispatch i samme transaksjon.                                                                            | En melding som ikke ble akseptert, teller ikke, så klientens nye forsøk straffes ikke.                                                                          |
+| Forbruk og dispatch (INSERT i køen) i samme transaksjon.                                                            | En melding som ikke ble akseptert, teller ikke, så klientens nye forsøk straffes ikke, og en melding i køen er alltid talt med.                                 |
 | Fail-closed: databasen utilgjengelig gir 503.                                                                       | Grensene kan ikke omgås ved at databasen er nede.                                                                                                               |
 | Override per tenant må ha både `per-hour` og `per-day`, og ingen tenantgrense kan overstige totalgrensen.           | Ingen fletting med `default` å holde rede på; en tenantgrense over totalen ville aldri slått inn og er trolig en feil.                                          |
 | Ved flere brudde grenser rapporteres den med lengst `Retry-After`.                                                  | Typen og ventetiden stemmer overens, og klienten får ikke ny 429 etter å ha ventet.                                                                             |
@@ -898,3 +1019,8 @@ kjører da på hver replika; slettingene er idempotente, så det gjør ingen ska
 | Ingen gauge for mottakergrensen.                                                                                    | Én serie per mottaker er ikke mulig (kardinalitet og personvern); avvisningene telles med `limit="mottaker"`.                                                   |
 | Aksepterte meldinger telles etter commit.                                                                           | En melding som rulles tilbake (f.eks. feil i dispatch), er ikke akseptert og skal ikke telles.                                                                  |
 | Varselreglene dokumenteres i runbooken og registreres manuelt i Grafana Alerts.                                     | Ingen tjenester i clusteret leverer varselregler fra repoet; tabellen i runbooken er kilden og gjennomgås i PR.                                                 |
+| Utsending via kø-tabell i Postgres og en poller med `FOR UPDATE SKIP LOCKED`, ikke via en tråd etter commit.        | Meldinger med `202` overlever restart, flere replikaer deler køen, og kallet til leverandøren skjer utenfor transaksjonen. Ingen ny infrastruktur.              |
+| Innholdet i køen krypteres med en egen nøkkel.                                                                      | Adresser lagres aldri i klartekst, heller ikke de minuttene en melding venter. Egen nøkkel, siden hashing-nøkkelen har et annet formål og ikke kan roteres.     |
+| Køen er en arbeidskø; raden slettes ved `SENT` og `FAILED`.                                                         | Status per melding hører til FFS-2337; køen holdes liten og uten innhold lenger enn nødvendig.                                                                  |
+| Feil nøkkel hos leverandøren regnes som forbigående.                                                                | Skyldes konfig, ikke meldingen; meldingene sendes når nøkkelen er rettet innen forsøkene er brukt opp.                                                          |
+| Leverandøren `logging` er default.                                                                                  | Tjenesten starter og kan testes lokalt, i tester og i beta uten leverandør.                                                                                     |

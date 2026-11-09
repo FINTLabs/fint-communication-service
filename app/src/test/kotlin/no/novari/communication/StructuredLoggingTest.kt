@@ -47,7 +47,7 @@ class StructuredLoggingTest {
 
         assertThat(line.path("@timestamp").asString()).isNotBlank()
         assertThat(line.path("level").asString()).isEqualTo("INFO")
-        assertThat(line.path("logger_name").asString()).endsWith("LoggingMessageDispatcher")
+        assertThat(line.path("logger_name").asString()).endsWith("QueueingMessageDispatcher")
         assertThat(line.path("message").asString()).contains("tenant=ROGALAND")
         assertThat(output.all)
             .doesNotContainIgnoringCase(ADDRESS)
