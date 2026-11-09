@@ -74,13 +74,21 @@ class ControllableEmailAdapter : EmailAdapter {
     private val outcomes = ConcurrentLinkedQueue<EmailSendOutcome>()
     val sent = CopyOnWriteArrayList<Pair<MessageId, EmailPayload>>()
 
+    @Volatile
+    private var beforeNextResponse: (() -> Unit)? = null
+
     fun respondWith(vararg outcome: EmailSendOutcome) {
         outcomes += outcome
+    }
+
+    fun beforeNextResponse(action: () -> Unit) {
+        beforeNextResponse = action
     }
 
     fun reset() {
         outcomes.clear()
         sent.clear()
+        beforeNextResponse = null
     }
 
     override fun send(
@@ -88,6 +96,7 @@ class ControllableEmailAdapter : EmailAdapter {
         email: EmailPayload,
     ): EmailSendOutcome {
         sent += id to email
+        beforeNextResponse?.also { beforeNextResponse = null }?.invoke()
         return outcomes.poll() ?: EmailSendOutcome.Sent
     }
 }
