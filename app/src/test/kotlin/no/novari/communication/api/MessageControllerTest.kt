@@ -400,6 +400,13 @@ class MessageControllerTest {
             failureReason: FailureReason?,
             at: Instant,
         ) = throw UnsupportedOperationException()
+
+        override fun applyReport(
+            id: MessageId,
+            status: MessageStatus,
+            failureReason: FailureReason?,
+            at: Instant,
+        ) = throw UnsupportedOperationException()
     }
 
     @TestConfiguration

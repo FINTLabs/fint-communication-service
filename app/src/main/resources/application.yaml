@@ -44,6 +44,8 @@ communication:
     usage-refresh: 60s
   email:
     provider: logging
+    delivery-reports:
+      poll-interval: 10s
   dispatch:
     poll-interval: 2s
     batch-size: 10
