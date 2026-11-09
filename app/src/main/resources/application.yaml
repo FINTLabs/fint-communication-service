@@ -6,6 +6,11 @@ spring:
     username: ${fint.database.username}
     password: ${fint.database.password}
 
+logging:
+  structured:
+    format:
+      console: logstash
+
 server:
   port: ${SERVER_PORT:8080}
 
@@ -20,7 +25,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,metrics,prometheus
 
 communication:
   limits:
