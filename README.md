@@ -31,12 +31,14 @@ egne oppgaver under [FFS-1865](https://novari-iks.atlassian.net/browse/FFS-1865)
 
 ## Endepunkter
 
-| Endepunkt                    | Bruk            |
-|------------------------------|-----------------|
-| `POST /api/v1/messages`      | Send melding    |
-| `/actuator/health`           | Startup-probe   |
-| `/actuator/health/liveness`  | Liveness-probe  |
-| `/actuator/health/readiness` | Readiness-probe |
+| Endepunkt                    | Bruk                                        |
+|------------------------------|---------------------------------------------|
+| `POST /api/v1/messages`      | Send melding                                |
+| `/actuator/health`           | Startup-probe                               |
+| `/actuator/health/liveness`  | Liveness-probe                              |
+| `/actuator/health/readiness` | Readiness-probe                             |
+| `/actuator/metrics`          | Metrikker som JSON, til feilsøking          |
+| `/actuator/prometheus`       | Metrikker for Prometheus (scrapes av Flais) |
 
 ## Sende melding
 
@@ -199,6 +201,12 @@ med Jackson 2 (`:client:test`) og Spring Framework 7 med Jackson 3 (`:client:tes
 
 `bootTestRun` starter appen med en Postgres-container og en testnøkkel for mottaker-hashing.
 
+Loggen er JSON, også lokalt og i testene. Lesbar tekst får man med et tomt format:
+
+```bash
+./gradlew :app:bootTestRun --args='--logging.structured.format.console='
+```
+
 ## Konfigurasjon
 
 | Variabel                                                                                      | Innhold                                                                                              |
@@ -209,6 +217,8 @@ med Jackson 2 (`:client:test`) og Spring Framework 7 med Jackson 3 (`:client:tes
 | `communication.limits.tenant.default.per-hour`, `communication.limits.tenant.default.per-day` | Grenser per tenant (100 og 500, ikke bekreftet) i `application.yaml`.                                |
 | `communication.limits.tenant.overrides.<TENANT>.per-hour`, `...per-day`                       | Valgfri override per tenant. Nøkkelen er enum-navnet i `Tenant`, og begge feltene må settes.         |
 | `communication.limits.total.per-hour`, `communication.limits.total.per-day`                   | Grenser for alle tenants samlet (500 og 2000, ikke bekreftet) i `application.yaml`.                  |
+| `logging.structured.format.console`                                                           | Loggformat. `logstash` (JSON til stdout) i `application.yaml`.                                       |
+| `logging.level.<pakke>` (eller `LOGGING_LEVEL_<PAKKE>`)                                       | Log-nivå per pakke, f.eks. `logging.level.no.novari.communication=DEBUG`. Default `INFO`.            |
 
 Alle grenser må være større enn 0, og `per-day` minst like stor som `per-hour`. Tenantgrensene
 (`default` og hver override) kan ikke være høyere enn totalgrensen. Ukjent tenant i `overrides` eller
@@ -216,6 +226,16 @@ en override med bare ett av feltene stopper også oppstarten.
 
 Ny nøkkel lages med `openssl rand -base64 32`. Bytter man nøkkel, kjenner tjenesten ikke lenger igjen
 mottakere som er lagret fra før; se [Database](docs/architecture.md#database).
+
+Log-nivået endres uten kodeendring ved å legge en env-variabel i overlayet:
+
+```yaml
+- op: add
+  path: "/spec/env/-"
+  value:
+    name: "logging.level.no.novari.communication"
+    value: "DEBUG"
+```
 
 Flyway kjører migreringene i `app/src/main/resources/db/migration` ved oppstart.
 
