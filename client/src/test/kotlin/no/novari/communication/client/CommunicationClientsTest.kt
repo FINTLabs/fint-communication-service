@@ -166,6 +166,48 @@ class CommunicationClientsTest {
     }
 
     @Test
+    fun `the status from a delivery report is read`() {
+        responseStatus = 200
+        responseBody =
+            """
+            {
+              "id": "$messageId",
+              "status": "BOUNCED",
+              "failureReason": null,
+              "receivedAt": "2026-10-09T08:00:00Z",
+              "updatedAt": "2026-10-09T08:01:30Z"
+            }
+            """
+        val client = CommunicationClients.create(RestClient.builder().baseUrl(baseUrl).build())
+
+        val response = client.getStatus(messageId)
+
+        assertEquals(MessageStatus.BOUNCED, response.status)
+        assertEquals(null, response.failureReason)
+    }
+
+    @Test
+    fun `the status of a message that was not delivered has the failure reason`() {
+        responseStatus = 200
+        responseBody =
+            """
+            {
+              "id": "$messageId",
+              "status": "FAILED",
+              "failureReason": "DELIVERY_FAILED",
+              "receivedAt": "2026-10-09T08:00:00Z",
+              "updatedAt": "2026-10-09T08:01:30Z"
+            }
+            """
+        val client = CommunicationClients.createReactive(webClient())
+
+        val response = client.getStatus(messageId).block()
+
+        assertEquals(MessageStatus.FAILED, response?.status)
+        assertEquals(FailureReason.DELIVERY_FAILED, response?.failureReason)
+    }
+
+    @Test
     fun `blocking client throws not found for an unknown message`() {
         responseStatus = 404
         responseBody = """{"status":404,"detail":"Meldingen finnes ikke"}"""

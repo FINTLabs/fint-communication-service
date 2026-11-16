@@ -46,6 +46,10 @@ dependencies {
         exclude(group = "software.amazon.awssdk", module = "netty-nio-client")
         exclude(group = "software.amazon.awssdk", module = "apache-client")
     }
+    implementation("software.amazon.awssdk:sqs") {
+        exclude(group = "software.amazon.awssdk", module = "netty-nio-client")
+        exclude(group = "software.amazon.awssdk", module = "apache-client")
+    }
     implementation("software.amazon.awssdk:url-connection-client")
 
     testImplementation("org.springframework.boot:spring-boot-starter-actuator-test")
