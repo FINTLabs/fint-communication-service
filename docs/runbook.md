@@ -19,6 +19,7 @@ beskrevet i [README](../README.md#grenser) og
 10. [Slå opp en melding](#slå-opp-en-melding)
 11. [Justere grenser](#justere-grenser)
 12. [Testvarsel](#testvarsel)
+13. [Verifisere utsending](#verifisere-utsending)
 
 ## Metrikker
 
@@ -162,7 +163,10 @@ i det hele tatt.
 - `communication_message_retried_total` per `reason` viser hvorfor sendingen feiler:
   - `server-error`, `timeout` eller `io`: leverandøren er utilgjengelig eller treg.
   - `throttled`: leverandøren struper trafikken. Køen tømmes av seg selv når den slipper til igjen.
-  - `unauthorized`: nøkkelen til leverandøren er feil eller rotert. Sjekk 1Password-itemet og restart podden.
+  - `unauthorized`: nøklene til SES (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) er feil eller rotert,
+    eller AWS har satt sendingen på pause. Sjekk 1Password-itemet og restart podden, og se
+    «Reputation metrics» i SES-konsollet.
+  - `unexpected` med `detalj=SdkClientException`: nøklene til SES mangler i 1Password-itemet.
   - `unexpected` med `detalj=javax.crypto.AEADBadTagException`: meldingen kan ikke dekrypteres, fordi
     `COMMUNICATION_DISPATCH_ENCRYPTION_KEY` er byttet eller feil. Rettes nøkkelen før forsøkene er brukt
     opp, sendes meldingene; ellers feiler de med `retries-exhausted`.
@@ -246,3 +250,29 @@ En konstruert overskridelse i beta, for å bekrefte at varslene i Grafana Alerts
    utnyttelsen for `NOVARI` er over 0.8, og at varslene «Tenantgrense nådd» og «Høy utnyttelse, tenant»
    går.
 4. Fjern overriden og deploy igjen.
+
+## Verifisere utsending
+
+Bekrefter at e-post går fra REST via mal og SES til en reell adresse. Forutsetter at SES er slått på
+i miljøet (se [README](../README.md#slå-på-ses)). Mens SES-kontoen er i sandkassen, må mottakeren
+være verifisert i SES.
+
+1. Åpne en port til tjenesten (den har ingen ingress):
+
+   ```bash
+   kubectl -n fintlabs-no port-forward deploy/fint-communication-service 8080:8080
+   ```
+
+2. Send testmalen med tenant `NOVARI` til en adresse du har tilgang til:
+
+   ```bash
+   curl -i -X POST localhost:8080/api/v1/messages -H 'Content-Type: application/json' -d '{"tenant":"NOVARI","message":{"channel":"EMAIL","to":"<din adresse>","templateId":"novari/test","variables":{"melding":"Verifisering av utsending"}}}'
+   ```
+
+3. Bekreft:
+   - svaret er `202` med en meldings-ID,
+   - loggen har `Melding mottatt` og `Melding sendt` med samme ID, og `status=SENT`,
+   - `GET /api/v1/messages/{id}` gir `SENT`,
+   - `communication_message_sent_total{tenant="NOVARI"}` har økt,
+   - e-posten har kommet fram, med avsender fra `communication.email.sender` og svaradresse
+     `no-reply@novari.no`, uten sporingspiksel eller omskrevne lenker.

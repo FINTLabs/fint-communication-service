@@ -24,6 +24,7 @@ sourceSets {
 dependencies {
     implementation(platform(libs.spring.boot.dependencies))
     implementation(platform(libs.jackson3.bom))
+    implementation(platform(libs.aws.sdk.bom))
     constraints {
         implementation(libs.tomcat.embed.core)
         implementation(libs.tomcat.embed.el)
@@ -41,6 +42,11 @@ dependencies {
     implementation("tools.jackson.dataformat:jackson-dataformat-yaml")
     implementation("com.samskivert:jmustache")
     implementation(libs.kotlin.logging)
+    implementation("software.amazon.awssdk:sesv2") {
+        exclude(group = "software.amazon.awssdk", module = "netty-nio-client")
+        exclude(group = "software.amazon.awssdk", module = "apache-client")
+    }
+    implementation("software.amazon.awssdk:url-connection-client")
 
     testImplementation("org.springframework.boot:spring-boot-starter-actuator-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")

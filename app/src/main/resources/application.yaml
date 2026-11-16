@@ -10,6 +10,8 @@ logging:
   structured:
     format:
       console: logstash
+  level:
+    software.amazon.awssdk: "off"
 
 server:
   port: ${SERVER_PORT:8080}

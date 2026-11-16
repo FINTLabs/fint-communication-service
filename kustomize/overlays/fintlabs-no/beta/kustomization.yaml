@@ -10,6 +10,26 @@ patches:
       - op: replace
         path: "/spec/onePassword/itemPath"
         value: "vaults/aks-beta-vault/items/fint-communication-service"
+      - op: add
+        path: "/spec/env/-"
+        value:
+          name: "communication.limits.tenant.default.per-hour"
+          value: "8"
+      - op: add
+        path: "/spec/env/-"
+        value:
+          name: "communication.limits.tenant.default.per-day"
+          value: "100"
+      - op: add
+        path: "/spec/env/-"
+        value:
+          name: "communication.limits.total.per-hour"
+          value: "8"
+      - op: add
+        path: "/spec/env/-"
+        value:
+          name: "communication.limits.total.per-day"
+          value: "100"
     target:
       kind: Application
       name: fint-communication-service
