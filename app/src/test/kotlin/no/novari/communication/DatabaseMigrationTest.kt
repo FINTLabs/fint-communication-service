@@ -31,4 +31,15 @@ class DatabaseMigrationTest {
 
         assertThat(indexes).contains("send_usage_sent_at")
     }
+
+    @Test
+    fun `dispatch_queue has an index for finding due messages`() {
+        val indexes =
+            jdbcClient
+                .sql("SELECT indexname FROM pg_indexes WHERE tablename = 'dispatch_queue'")
+                .query(String::class.java)
+                .list()
+
+        assertThat(indexes).contains("dispatch_queue_pkey", "dispatch_queue_next_attempt_at")
+    }
 }
