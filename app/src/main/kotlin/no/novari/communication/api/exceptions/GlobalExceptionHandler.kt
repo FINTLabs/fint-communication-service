@@ -5,7 +5,9 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo
 import io.github.oshai.kotlinlogging.KotlinLogging
 import no.novari.communication.api.validation.ValidationError
 import no.novari.communication.limit.LimitExceededException
+import no.novari.communication.message.MessageNotFoundException
 import no.novari.communication.template.EmailTemplate
+import org.springframework.beans.TypeMismatchException
 import org.springframework.dao.DataAccessResourceFailureException
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
@@ -51,6 +53,10 @@ class GlobalExceptionHandler : ResponseEntityExceptionHandler() {
             .body(problem)
     }
 
+    @ExceptionHandler(MessageNotFoundException::class)
+    fun handleMessageNotFound(): ProblemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, "Meldingen finnes ikke")
+
     @ExceptionHandler(
         CannotCreateTransactionException::class,
         DataAccessResourceFailureException::class,
@@ -90,6 +96,19 @@ class GlobalExceptionHandler : ResponseEntityExceptionHandler() {
             } else {
                 badRequest("Requesten inneholder ugyldige felt", listOf(error))
             }
+        return handleExceptionInternal(ex, problem, headers, HttpStatus.BAD_REQUEST, request)
+    }
+
+    override fun handleTypeMismatch(
+        ex: TypeMismatchException,
+        headers: HttpHeaders,
+        status: HttpStatusCode,
+        request: WebRequest,
+    ): ResponseEntity<Any>? {
+        val field = ex.propertyName ?: "ukjent"
+        log.warn { "Ugyldig verdi i forespørselen, felt=$field" }
+        val problem =
+            badRequest("Requesten inneholder ugyldige felt", listOf(ValidationError(field, "har feil format")))
         return handleExceptionInternal(ex, problem, headers, HttpStatus.BAD_REQUEST, request)
     }
 

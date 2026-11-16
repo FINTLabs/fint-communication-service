@@ -1,5 +1,7 @@
 package no.novari.communication.email
 
+import no.novari.communication.model.FailureReason
+
 sealed interface EmailSendOutcome {
     data object Sent : EmailSendOutcome
 
@@ -25,9 +27,5 @@ enum class RetryReason(
     UNEXPECTED("unexpected"),
 }
 
-enum class FailureReason(
-    val value: String,
-) {
-    REJECTED("rejected"),
-    RETRIES_EXHAUSTED("retries-exhausted"),
-}
+val FailureReason.value: String
+    get() = name.lowercase().replace('_', '-')
