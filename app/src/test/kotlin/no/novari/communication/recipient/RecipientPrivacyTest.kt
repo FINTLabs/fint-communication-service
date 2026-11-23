@@ -4,6 +4,7 @@ import io.micrometer.core.instrument.MeterRegistry
 import no.novari.communication.IntegrationTest
 import no.novari.communication.TEST_RECIPIENT_HASHING_KEY
 import no.novari.communication.limit.LimitExceededException
+import no.novari.communication.limit.LimitUsageMetrics
 import no.novari.communication.message.MessageService
 import no.novari.communication.message.domain.EmailPayload
 import no.novari.communication.model.Tenant
@@ -40,6 +41,9 @@ class RecipientPrivacyTest {
     lateinit var messageService: MessageService
 
     @Autowired
+    lateinit var usageMetrics: LimitUsageMetrics
+
+    @Autowired
     lateinit var webApplicationContext: WebApplicationContext
 
     @BeforeEach
@@ -47,6 +51,8 @@ class RecipientPrivacyTest {
         jdbcClient.sql("DELETE FROM send_usage").update()
         repeat(RECIPIENT_PER_HOUR) { send() }
         assertThatThrownBy { send() }.isInstanceOf(LimitExceededException::class.java)
+
+        usageMetrics.refresh()
     }
 
     @Test
@@ -84,7 +90,7 @@ class RecipientPrivacyTest {
     }
 
     @Test
-    fun `the prometheus scrape contains neither the address nor its hash`() {
+    fun `the prometheus scrape has the limit metrics per tenant but neither address nor hash`() {
         val scrape =
             MockMvcBuilders
                 .webAppContextSetup(webApplicationContext)
@@ -94,6 +100,11 @@ class RecipientPrivacyTest {
                 .andReturn()
                 .response.contentAsString
 
+        assertThat(scrape)
+            .containsPattern("""communication_limit_rejected_total\{limit="mottaker",tenant="ROGALAND"}""")
+            .containsPattern("""communication_message_accepted_total\{channel="EMAIL",tenant="ROGALAND"}""")
+            .containsPattern("""communication_limit_tenant_usage_ratio\{tenant="ROGALAND",window="hour"}""")
+            .containsPattern("""communication_limit_total_usage_ratio\{window="day"}""")
         assertThat(scrape)
             .doesNotContainIgnoringCase(ADDRESS.trim())
             .doesNotContain(hasher.hash(ADDRESS).value)

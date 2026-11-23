@@ -97,7 +97,8 @@ C4Container
 Blå bokser er en del av fint-communication-service, grå er eksterne. Tjenesten består av
 API-applikasjonen og en Postgres-database (`fint-common`), som migreres med Flyway ved oppstart.
 Databasen har tabellen `send_usage` for grensene per mottaker, tenant og totalt. Meldingsstatus kommer i FFS-2337.
-Prometheus scraper `/actuator/prometheus` via en PodMonitor som Flais lager.
+Prometheus scraper `/actuator/prometheus` via en PodMonitor som Flais lager. Dashboardet ligger i
+`grafana/`, og varslene og hva vakthavende gjør er beskrevet i [runbooken](runbook.md).
 API-applikasjonen holder ingen tilstand i minnet og kan skaleres horisontalt. Malene ligger i
 applikasjonens classpath og er ikke en egen container.
 
@@ -117,8 +118,9 @@ C4Component
     Component(limiter, "SendLimiter", "limit", "Grenser per mottaker, tenant og totalt. Teller og registrerer forbruk.")
     Component(hasher, "RecipientHasher", "recipient", "HMAC-SHA256 av normalisert adresse.")
     ComponentDb(usage, "send_usage", "Postgres", "Én rad per akseptert melding.")
-    Component(dispatcher, "MessageDispatcher", "message.dispatch", "Port for leveranse. I dag LoggingMessageDispatcher, som logger og forkaster.")
-    ComponentDb(files, "Malfiler", "classpath templates/", "template.yaml og body.html per mal.")
+
+    Component(dispatcher, "MessageDispatcher", "message.dispatch", "Port for leveranse. I dag: logger og forkaster.")
+    Component(usageMetrics, "LimitUsageMetrics", "limit", "Utnyttelse av grensene per tenant og totalt, hvert minutt.")
 
     Rel(konsumentApp, controller, "POST /api/v1/messages", "HTTP/JSON")
     Rel(controller, validator, "Validerer")
@@ -128,8 +130,7 @@ C4Component
     Rel(service, limiter, "Sjekker grenser")
     Rel(limiter, usage, "Teller og skriver", "JDBC")
     Rel(service, dispatcher, "Leverer videre")
-    Rel(loader, catalog, "Bygger")
-    Rel(loader, files, "Leser ved oppstart")
+    Rel(usageMetrics, usage, "Teller per tenant", "JDBC")
 
     UpdateRelStyle(konsumentApp, controller, $textColor="#3B82F6", $lineColor="#3B82F6")
     UpdateRelStyle(controller, validator, $textColor="#3B82F6", $lineColor="#3B82F6")
@@ -138,10 +139,9 @@ C4Component
     UpdateRelStyle(service, hasher, $textColor="#3B82F6", $lineColor="#3B82F6")
     UpdateRelStyle(service, limiter, $textColor="#3B82F6", $lineColor="#3B82F6")
     UpdateRelStyle(limiter, usage, $textColor="#3B82F6", $lineColor="#3B82F6")
-    UpdateRelStyle(service, dispatcher, $textColor="#3B82F6", $lineColor="#3B82F6", $offsetY="-28")
-    UpdateRelStyle(loader, catalog, $textColor="#3B82F6", $lineColor="#3B82F6")
-    UpdateRelStyle(loader, files, $textColor="#3B82F6", $lineColor="#3B82F6")
-    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
+    UpdateRelStyle(service, dispatcher, $textColor="#3B82F6", $lineColor="#3B82F6")
+    UpdateRelStyle(usageMetrics, usage, $textColor="#3B82F6", $lineColor="#3B82F6")
+    UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="1")
 ```
 
 Alle blå bokser er komponenter i API-applikasjonen. `GlobalExceptionHandler` har ingen piler: Spring kaller den når en av de andre komponentene kaster
@@ -788,43 +788,65 @@ En tenantgrense lavere enn mottakergrensen er tillatt.
 - **Transaksjon.** Telling, registrering og dispatch skjer i samme transaksjon
   (`MessageService.receive`). En avvist eller feilet melding etterlater ingen rad.
 - **Opprydning.** `SendUsageCleaner` sletter rader eldre enn 24 timer.
+- **Metrikker.** `DatabaseSendLimiter` øker `communication.limit.rejected` (tagger `limit` og `tenant`)
+  ved hver 429. `MessageMetrics` øker `communication.message.accepted` (tagger `tenant` og `channel`)
+  når transaksjonen er committet, via en `@TransactionalEventListener` på `MessageAccepted`, så en
+  melding som rulles tilbake, ikke telles. `LimitUsageMetrics` regner ut utnyttelsen (forbruk delt på
+  grense) per tenant og totalt for hvert vindu med én `GROUP BY tenant`-spørring mot `send_usage` hvert
+  minutt, og publiserer den som `communication.limit.tenant.usage` (`tenant`, `window`) og
+  `communication.limit.total.usage` (`window`). Varslene er beskrevet i [runbooken](runbook.md).
+
+| Metrikk (Prometheus)                     | Type    | Tagger                                            |
+|------------------------------------------|---------|---------------------------------------------------|
+| `communication_limit_rejected_total`     | Counter | `limit` (`mottaker`, `tenant`, `total`), `tenant` |
+| `communication_message_accepted_total`   | Counter | `tenant`, `channel`                               |
+| `communication_limit_tenant_usage_ratio` | Gauge   | `tenant`, `window` (`hour`, `day`)                |
+| `communication_limit_total_usage_ratio`  | Gauge   | `window` (`hour`, `day`)                          |
+
+Utnyttelsen kan ligge opptil ett minutt etter (`communication.limits.usage-refresh`). Alle tenants
+rapporteres, også de uten forbruk. Med flere replikaer rapporterer alle samme verdi, så spørringer i
+Grafana og varsler bruker `max`. Det finnes ingen gauge for mottakergrensen, siden den ville trengt én
+serie per mottaker; avvisningene der telles med `limit="mottaker"`.
 
 
 ## Personvern og logging
 
 Mottaker, emne, innhold og variabelverdier kan inneholde personopplysninger.
 
-| Tiltak                                                                                                                        | Hvor                                            |
-|-------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------|
-| Klienter kan ikke sende fritekst; alt innhold kommer fra gjennomgåtte maler.                                                  | Malsystemet                                     |
-| `toString()` maskerer mottaker, emne, innhold og verdier.                                                                     | `EmailMessage`, `EmailPayload`, `RenderedEmail` |
-| Feilmeldinger gjentar aldri innsendte verdier. Navn tas bare med når de har formen til et variabelnavn.                       | `SendMessageRequestValidator`                   |
-| Jacksons feilmeldinger, som kan sitere verdier, brukes ikke i respons eller logg; bare JSON-stien.                            | `GlobalExceptionHandler`                        |
-| Loggen ved mottak inneholder bare `id`, `tenant`, `channel` og `templateId`.                                                  | `LoggingMessageDispatcher`                      |
-| Mottakere lagres bare som HMAC-hash. Nøkkel, adresse og hash logges aldri.                                                    | `RecipientHasher`                               |
-| 429-svaret og WARN-loggen har bare grensetype, `tenant` og meldings-ID, aldri adresse eller hash.                             | `GlobalExceptionHandler`                        |
-| JSON-loggen har de samme meldingene som før og ingen MDC-felt; en test sjekker formatet og at adressen ikke er med.           | `StructuredLoggingTest`                         |
-| En test sjekker at adressen ikke finnes i logg, i noen tekstkolonne i databasen, i metrikk-tagger eller i Prometheus-scrapen. | `RecipientPrivacyTest`                          |
+| Tiltak                                                                                                                              | Hvor                                                         |
+|-------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------|
+| Klienter kan ikke sende fritekst; alt innhold kommer fra gjennomgåtte maler.                                                        | Malsystemet                                                  |
+| `toString()` maskerer mottaker, emne, innhold og verdier.                                                                           | `EmailMessage`, `EmailPayload`, `RenderedEmail`              |
+| Feilmeldinger gjentar aldri innsendte verdier. Navn tas bare med når de har formen til et variabelnavn.                             | `SendMessageRequestValidator`                                |
+| Jacksons feilmeldinger, som kan sitere verdier, brukes ikke i respons eller logg; bare JSON-stien.                                  | `GlobalExceptionHandler`                                     |
+| Loggen ved mottak inneholder bare `id`, `tenant`, `channel` og `templateId`.                                                        | `LoggingMessageDispatcher`                                   |
+| Mottakere lagres bare som HMAC-hash. Nøkkel, adresse og hash logges aldri.                                                          | `RecipientHasher`                                            |
+| 429-svaret og WARN-loggen har bare grensetype, `tenant` og meldings-ID, aldri adresse eller hash.                                   | `GlobalExceptionHandler`                                     |
+| Tellerne og gaugene for grensene og aksepterte meldinger har bare enum-verdier som tagger (`limit`, `tenant`, `channel`, `window`). | `DatabaseSendLimiter`, `MessageMetrics`, `LimitUsageMetrics` |
+| JSON-loggen har de samme meldingene som før og ingen MDC-felt; en test sjekker formatet og at adressen ikke er med.                 | `StructuredLoggingTest`                                      |
+| En test sjekker at adressen ikke finnes i logg, i noen tekstkolonne i databasen, i metrikk-tagger eller i Prometheus-scrapen.       | `RecipientPrivacyTest`                                       |
 
 `replyTo` kommer fra malen og er en Novari-adresse, så den vises umaskert.
 
 ## Drift
 
-| Egenskap      | Verdi                                                                                                                                                       |
-|---------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Image         | `ghcr.io/fintlabs/fint-communication-service`, distroless Java 25                                                                                           |
-| Namespace     | `fintlabs-no` (én deployment for alle tenants)                                                                                                              |
-| Eksponering   | Bare intern i clusteret (ingen ingress)                                                                                                                     |
-| Port          | 8080                                                                                                                                                        |
-| Probes        | `/actuator/health` (startup), `/actuator/health/liveness`, `/actuator/health/readiness`                                                                     |
-| Logging       | JSON (Spring Boots `logstash`-format) til stdout, satt i `application.yaml`. Samles inn av Loki.                                                            |
-| Log-nivå      | `logging.level.<pakke>` som env i flais.yaml eller overlay, f.eks. `logging.level.no.novari.communication=DEBUG`.                                           |
-| Metrikker     | `/actuator/metrics` og `/actuator/prometheus` på port 8080. Flais lager en PodMonitor fra `spec.observability.metrics`.                                     |
-| Ressurser     | 256–512 Mi minne, 50–500m CPU, 1 replika                                                                                                                    |
-| Database      | Postgres `fint-common` via Flais (`spec.database`). Readiness inkluderer `db`.                                                                              |
-| Hemmeligheter | 1Password-item via `spec.onePassword.itemPath` (beta: `vaults/aks-beta-vault/items/fint-communication-service`), med `COMMUNICATION_RECIPIENT_HASHING_KEY`. |
-| Miljøer       | beta (`aks-beta-fint-2021-11-23`). Produksjon (`api`) er ikke satt opp.                                                                                     |
-| Bygg/deploy   | Push til `main` bygger image og deployer til beta (GitHub Actions).                                                                                         |
+| Egenskap      | Verdi                                                                                                                                                                                            |
+|---------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Image         | `ghcr.io/fintlabs/fint-communication-service`, distroless Java 25                                                                                                                                |
+| Namespace     | `fintlabs-no` (én deployment for alle tenants)                                                                                                                                                   |
+| Eksponering   | Bare intern i clusteret (ingen ingress)                                                                                                                                                          |
+| Port          | 8080                                                                                                                                                                                             |
+| Probes        | `/actuator/health` (startup), `/actuator/health/liveness`, `/actuator/health/readiness`                                                                                                          |
+| Logging       | JSON (Spring Boots `logstash`-format) til stdout, satt i `application.yaml`. Samles inn av Loki.                                                                                                 |
+| Log-nivå      | `logging.level.<pakke>` som env i flais.yaml eller overlay, f.eks. `logging.level.no.novari.communication=DEBUG`.                                                                                |
+| Metrikker     | `/actuator/metrics` og `/actuator/prometheus` på port 8080. Flais lager en PodMonitor fra `spec.observability.metrics`. Metrikkene for grenser er beskrevet i [runbooken](runbook.md#metrikker). |
+| Dashboard     | `grafana/fint-communication-service.json`, importeres manuelt i Grafana.                                                                                                                         |
+| Varsling      | Metrikker, terskler og varighet står i [runbooken](runbook.md#varselregler). Reglene registreres manuelt i Grafana Alerts.                                                                       |
+| Ressurser     | 256–512 Mi minne, 50–500m CPU, 1 replika                                                                                                                                                         |
+| Database      | Postgres `fint-common` via Flais (`spec.database`). Readiness inkluderer `db`.                                                                                                                   |
+| Hemmeligheter | 1Password-item via `spec.onePassword.itemPath` (beta: `vaults/aks-beta-vault/items/fint-communication-service`), med `COMMUNICATION_RECIPIENT_HASHING_KEY`.                                      |
+| Miljøer       | beta (`aks-beta-fint-2021-11-23`). Produksjon (`api`) er ikke satt opp.                                                                                                                          |
+| Bygg/deploy   | Push til `main` bygger image og deployer til beta (GitHub Actions).                                                                                                                              |
 
 All tilstand ligger i databasen, så API-applikasjonen kan skaleres horisontalt. Opprydningsjobben
 kjører da på hver replika; slettingene er idempotente, så det gjør ingen skade.
@@ -836,38 +858,43 @@ kjører da på hver replika; slettingene er idempotente, så det gjør ingen ska
 | FFS-1968 | `EmailAdapter` mot ACS, asynkron utsending, statusoverganger.                      |
 | FFS-1969 | Sentral layout rundt rendret innhold, `text/plain`-variant, HTML-regler for maler. |
 | FFS-1970 | Bearer-token fra NAM (Spring Security), 401 som ProblemDetail.                     |
-| FFS-2335 | Metrikker og varsling for grenser.                                                 |
 | FFS-2337 | Meldingsstatus per `MessageId`.                                                    |
 | FFS-2338 | Leveringsrapporter fra ACS.                                                        |
 | Fase 6   | Kafka som sekundær inngang, med samme validering og mottak som REST.               |
 
 ## Sentrale beslutninger
 
-| Beslutning                                                                                                          | Begrunnelse                                                                                                                                                    |
-|---------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| All e-post sendes via mal; ingen fritekst.                                                                          | Begrenser risikoen for personopplysninger i e-post; alt innhold gjennomgås i PR.                                                                               |
-| Maler er knyttet til kanal (`<team>/<kanal>/<mal>`).                                                                | Formatene er forskjellige per kanal; egne typer per kanal i koden.                                                                                             |
-| Team først i stien.                                                                                                 | Én CODEOWNERS-linje per team.                                                                                                                                  |
-| Variabler er strenger; lister er typet med `maxItems` og felt.                                                      | Øvre grense for innhold kan regnes ut; tall og datoer formateres av klienten.                                                                                  |
-| `replyTo` defineres i malen, ikke i requesten.                                                                      | Ingen risiko for personlige adresser som svaradresse.                                                                                                          |
-| Polymorf kontrakt (`{tenant, message: {channel, ...}}`) med sealed `Message`.                                       | Nøyaktig én melding følger av typen; nye kanaler er nye subtyper uten brudd i kontrakten.                                                                      |
-| Malen rendres ved mottak.                                                                                           | Feil blir 400 med en gang; meldingen er uavhengig av senere malendringer.                                                                                      |
-| ProblemDetail (RFC 9457) for alle feil.                                                                             | Standardformat, støttet direkte av Spring.                                                                                                                     |
-| JMustache direkte, egen kontroll av taggene.                                                                        | Logic-less maler; reglene kan håndheves ved oppstart.                                                                                                          |
-| Port (`MessageDispatcher`) mellom mottak og leveranse.                                                              | Leveransen kan byttes ut uten å endre API eller service.                                                                                                       |
-| `model` uten avhengigheter ved kjøring (bare `compileOnly` `jackson-annotations`), `client` uten autokonfigurasjon. | Bibliotekene kan brukes i alle Spring Boot 3- og 4-applikasjoner (Jackson 2 og 3).                                                                             |
-| Spring Data JDBC, ikke JPA.                                                                                         | Immutable Kotlin-klasser uten proxies. Tellere (`INSERT … ON CONFLICT`) og opprydning er native SQL uansett.                                                   |
-| Mottakere lagres som HMAC-SHA256 med hemmelig nøkkel, ikke ren SHA-256.                                             | E-postadresser er lette å gjette; uten nøkkelen kan hashen ikke slås opp mot en liste med adresser.                                                            |
-| Ingen nøkkelrotasjon.                                                                                               | Tellerne lever bare i timer eller dager og tåler et nøkkelbytte.                                                                                               |
-| Opprydning uten ShedLock.                                                                                           | Slettingene er idempotente; samtidige kjøringer på flere replikaer gjør ingen skade.                                                                           |
-| Grenser uten lås.                                                                                                   | Kan slippe gjennom noen få meldinger over grensen ved samtidige forespørsler. Enklere kode.                                                                    |
-| Én rad per akseptert melding i `send_usage`, ikke aggregerte bøtter.                                                | Ekte glidende vindu og eksakt `Retry-After`; få rader ved disse volumene.                                                                                      |
-| Forbruk og dispatch i samme transaksjon.                                                                            | En melding som ikke ble akseptert, teller ikke, så klientens nye forsøk straffes ikke.                                                                         |
-| Fail-closed: databasen utilgjengelig gir 503.                                                                       | Grensene kan ikke omgås ved at databasen er nede.                                                                                                              |
-| Override per tenant må ha både `per-hour` og `per-day`, og ingen tenantgrense kan overstige totalgrensen.           | Ingen fletting med `default` å holde rede på; en tenantgrense over totalen ville aldri slått inn og er trolig en feil.                                         |
-| Ved flere brudde grenser rapporteres den med lengst `Retry-After`.                                                  | Typen og ventetiden stemmer overens, og klienten får ikke ny 429 etter å ha ventet.                                                                            |
-| JSON-logging med Spring Boots innebygde `logstash`-format, også lokalt og i tester.                                 | Ingen ekstra avhengighet eller `logback.xml`; feltene er i praksis de samme som i andre tjenester i clusteret, og testene sjekker formatet som brukes i drift. |
-| Log-nivå med Springs egne `logging.level.*`-properties som env.                                                     | Virker for alle pakker uten kode, og er det samme andre tjenester i clusteret bruker.                                                                          |
-| Actuator på samme port som API-et (8080).                                                                           | Tjenesten er bare intern i clusteret, og probes og PodMonitor bruker samme port som andre tjenester.                                                           |
-| Ingen felles tagger (f.eks. `application`) på metrikkene.                                                           | PodMonitoren legger på `app`, `fintlabs.no/team` og `fintlabs.no/org-id`.                                                                                      |
-| Ingen korrelasjon-ID ennå.                                                                                          | Meldings-ID-en i 202-svaret og i loggen identifiserer meldingen. Korrelasjon-ID legges til når en konsument trenger den.                                       |
+| Beslutning                                                                                                          | Begrunnelse                                                                                                                                                     |
+|---------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| All e-post sendes via mal; ingen fritekst.                                                                          | Begrenser risikoen for personopplysninger i e-post; alt innhold gjennomgås i PR.                                                                                |
+| Maler er knyttet til kanal (`<team>/<kanal>/<mal>`).                                                                | Formatene er forskjellige per kanal; egne typer per kanal i koden.                                                                                              |
+| Team først i stien.                                                                                                 | Én CODEOWNERS-linje per team.                                                                                                                                   |
+| Variabler er strenger; lister er typet med `maxItems` og felt.                                                      | Øvre grense for innhold kan regnes ut; tall og datoer formateres av klienten.                                                                                   |
+| `replyTo` defineres i malen, ikke i requesten.                                                                      | Ingen risiko for personlige adresser som svaradresse.                                                                                                           |
+| Polymorf kontrakt (`{tenant, message: {channel, ...}}`) med sealed `Message`.                                       | Nøyaktig én melding følger av typen; nye kanaler er nye subtyper uten brudd i kontrakten.                                                                       |
+| Malen rendres ved mottak.                                                                                           | Feil blir 400 med en gang; meldingen er uavhengig av senere malendringer.                                                                                       |
+| ProblemDetail (RFC 9457) for alle feil.                                                                             | Standardformat, støttet direkte av Spring.                                                                                                                      |
+| JMustache direkte, egen kontroll av taggene.                                                                        | Logic-less maler; reglene kan håndheves ved oppstart.                                                                                                           |
+| Port (`MessageDispatcher`) mellom mottak og leveranse.                                                              | Leveransen kan byttes ut uten å endre API eller service.                                                                                                        |
+| `model` uten avhengigheter ved kjøring (bare `compileOnly` `jackson-annotations`), `client` uten autokonfigurasjon. | Bibliotekene kan brukes i alle Spring Boot 3- og 4-applikasjoner (Jackson 2 og 3).                                                                              |
+| Spring Data JDBC, ikke JPA.                                                                                         | Immutable Kotlin-klasser uten proxies. Tellere (`INSERT … ON CONFLICT`) og opprydning er native SQL uansett.                                                    |
+| Mottakere lagres som HMAC-SHA256 med hemmelig nøkkel, ikke ren SHA-256.                                             | E-postadresser er lette å gjette; uten nøkkelen kan hashen ikke slås opp mot en liste med adresser.                                                             |
+| Ingen nøkkelrotasjon.                                                                                               | Tellerne lever bare i timer eller dager og tåler et nøkkelbytte.                                                                                                |
+| Opprydning uten ShedLock.                                                                                           | Slettingene er idempotente; samtidige kjøringer på flere replikaer gjør ingen skade.                                                                            |
+| Grenser uten lås.                                                                                                   | Kan slippe gjennom noen få meldinger over grensen ved samtidige forespørsler. Enklere kode.                                                                     |
+| Én rad per akseptert melding i `send_usage`, ikke aggregerte bøtter.                                                | Ekte glidende vindu og eksakt `Retry-After`; få rader ved disse volumene.                                                                                       |
+| Forbruk og dispatch i samme transaksjon.                                                                            | En melding som ikke ble akseptert, teller ikke, så klientens nye forsøk straffes ikke.                                                                          |
+| Fail-closed: databasen utilgjengelig gir 503.                                                                       | Grensene kan ikke omgås ved at databasen er nede.                                                                                                               |
+| Override per tenant må ha både `per-hour` og `per-day`, og ingen tenantgrense kan overstige totalgrensen.           | Ingen fletting med `default` å holde rede på; en tenantgrense over totalen ville aldri slått inn og er trolig en feil.                                          |
+| Ved flere brudde grenser rapporteres den med lengst `Retry-After`.                                                  | Typen og ventetiden stemmer overens, og klienten får ikke ny 429 etter å ha ventet.                                                                             |
+| JSON-logging med Spring Boots innebygde `logstash`-format, også lokalt og i tester.                                 | Ingen ekstra avhengighet eller `logback.xml`; feltene er i praksis de samme som i andre tjenester i clusteret, og testene sjekker formatet som brukes i drift.  |
+| Log-nivå med Springs egne `logging.level.*`-properties som env.                                                     | Virker for alle pakker uten kode, og er det samme andre tjenester i clusteret bruker.                                                                           |
+| Actuator på samme port som API-et (8080).                                                                           | Tjenesten er bare intern i clusteret, og probes og PodMonitor bruker samme port som andre tjenester.                                                            |
+| Ingen felles tagger (f.eks. `application`) på metrikkene.                                                           | PodMonitoren legger på `app`, `fintlabs.no/team` og `fintlabs.no/org-id`.                                                                                       |
+| Ingen korrelasjon-ID ennå.                                                                                          | Meldings-ID-en i 202-svaret og i loggen identifiserer meldingen. Korrelasjon-ID legges til når en konsument trenger den.                                        |
+| Utnyttelsen regnes ut av en planlagt jobb hvert minutt, ikke ved scrape eller ved innsending.                       | Scrapen blir ikke treg eller feiler når databasen er nede, og verdien synker når vinduet glir, også uten trafikk. Én indeksert spørring per minutt per replika. |
+| Egne metrikknavn for utnyttelse per tenant og totalt.                                                               | Prometheus krever samme tagger for samme navn, og totalen har ingen tenant.                                                                                     |
+| Utnyttelsen aggregeres med `max` på tvers av replikaer.                                                             | Alle replikaer leser samme tabell og rapporterer samme verdi; `sum` ville gitt replikaer × forbruk.                                                             |
+| Ingen gauge for mottakergrensen.                                                                                    | Én serie per mottaker er ikke mulig (kardinalitet og personvern); avvisningene telles med `limit="mottaker"`.                                                   |
+| Aksepterte meldinger telles etter commit.                                                                           | En melding som rulles tilbake (f.eks. feil i dispatch), er ikke akseptert og skal ikke telles.                                                                  |
+| Varselreglene dokumenteres i runbooken og registreres manuelt i Grafana Alerts.                                     | Ingen tjenester i clusteret leverer varselregler fra repoet; tabellen i runbooken er kilden og gjennomgås i PR.                                                 |
