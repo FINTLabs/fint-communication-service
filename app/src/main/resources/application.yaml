@@ -23,6 +23,10 @@ management:
         include: health
 
 communication:
+  limits:
+    recipient:
+      per-hour: 10
+      per-day: 40
   retention:
     metadata: 60d
     cleanup-cron: "0 15 3 * * *"
