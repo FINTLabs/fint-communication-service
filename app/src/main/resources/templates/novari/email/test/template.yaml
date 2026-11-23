@@ -1,0 +1,5 @@
+description: Testmelding for å verifisere utsending i et miljø. Brukes med tenant NOVARI.
+subject: "Testmelding fra fint-communication-service"
+replyTo: no-reply@novari.no
+variables:
+  melding: { maxLength: 200 }
