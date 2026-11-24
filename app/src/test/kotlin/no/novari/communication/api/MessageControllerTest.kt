@@ -84,7 +84,6 @@ class MessageControllerTest {
             jsonPath("$.status") { value(400) }
             jsonPath("$.title") { value("Bad Request") }
             jsonPath("$.detail") { value("Requesten inneholder ugyldige felt") }
-            jsonPath("$.instance") { value(MessageController.MESSAGES_PATH) }
             jsonPath("$.errors[0].field") { value("message.to") }
             jsonPath("$.errors[0].message") { value("må være én gyldig e-postadresse") }
             jsonPath("$.errors[1].field") { value("message.variables.saksnummer") }

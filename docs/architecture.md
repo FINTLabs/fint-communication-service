@@ -461,7 +461,6 @@ Eksempel på 400:
   "title": "Bad Request",
   "status": 400,
   "detail": "Requesten inneholder ugyldige felt",
-  "instance": "/api/v1/messages",
   "errors": [
     { "field": "message.to", "message": "må være én gyldig e-postadresse" },
     { "field": "message.variables.antallFeil", "message": "kan ikke være lengre enn 6 tegn" }
