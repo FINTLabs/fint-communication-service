@@ -7,5 +7,5 @@ on:
 
 jobs:
   publish:
-    uses: FINTLabs/fint-flyt-github-workflows/.github/workflows/java-library-publish-reposilite.yaml@main
+    uses: FINTLabs/fint-flyt-github-workflows/.github/workflows/java-library-publish-reposilite.yaml@1508232829d2478b588e004c224c804a955e2a9a # v1.0.0
     secrets: inherit
